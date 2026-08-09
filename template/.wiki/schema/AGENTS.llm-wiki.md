@@ -2,7 +2,7 @@
 title: LLM Wiki Schema
 summary: Operating contract for any agent reading or writing the workspace LLM Wiki at .wiki/.
 created: 2026-08-05
-updated: 2026-08-05
+updated: 2026-08-10
 ---
 
 # LLM Wiki Schema
@@ -22,6 +22,7 @@ Maintain a compounding Markdown knowledge base owned by the agent. Raw sources a
 ├── raw/                          # immutable source captures
 │   └── _index.md
 ├── inbox/                        # temporary drop zone for un-ingested files
+│   └── journal.md                # one-line write-ahead log for maybe-wiki-grade moments
 ├── assets/                       # local images / attachments
 ├── schema/
 │   └── AGENTS.llm-wiki.md        # this file
@@ -128,6 +129,17 @@ Work produces something the user would want to find again:
 4. If a synthesized page was created or an entity/concept was added, run `pwsh -File scripts/llm-wiki.ps1 reindex`. If only an existing page was edited in place, skip the reindex.
 
 Keep it light. One small raw file plus one wiki-page touch is the typical capture. If a raw note is growing long, the signal probably belongs in the synthesized page instead.
+
+### Compaction boundary rule — never let wiki-grade knowledge cross a compaction
+
+Long sessions get compacted (summarized). Compaction keeps *what was done* and drops *why, the details, and the failure path* — exactly the meat of wiki-grade knowledge. The moment knowledge is freshest (a bloated context) is also the moment just before it is lost. Therefore:
+
+1. **Write it now.** Once something qualifies under "Capture when", record it in the same stretch of work — do not defer to end-of-session, which a compaction may never let arrive.
+2. **One-line journal as WAL.** When unsure whether something is wiki-grade, or when mid-task with no room for a full capture, append one line to `.wiki/inbox/journal.md`:
+   `- [YYYY-MM-DD] <one-line pointer to the insight and where it happened>`
+   This is a write-ahead log: the pointer survives outside the context window even if the session is compacted before the full page is written. Full page creation happens at the next natural pause.
+3. **A bloated context is the stocktake signal.** Context size is a proxy for accumulated session knowledge. When compaction is near (or has just happened), review `.wiki/inbox/journal.md`, promote entries that qualify into pages, and delete the promoted lines. The journal should trend toward empty.
+4. **Environment-side backstop.** Wire the kit's `hooks/precompact_hook.py` as a PreCompact hook (see the kit README). It injects a preservation instruction for the summarizer and the post-compaction model. It is a safety net, not a substitute for rules 1-3.
 
 ### Wiki vs. memory boundary
 

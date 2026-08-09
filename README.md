@@ -10,13 +10,18 @@ Andrej Karpathy が提唱した LLM Wiki のアイデア（raw は不変・synth
 ## 何が嬉しいのか
 
 ふつうのメモやドキュメントは「エージェントが読みに行かない」から腐ります。
-このキットは2つの仕掛けでそれを解決します:
+このキットは3つの仕掛けでそれを解決します:
 
 1. **呼び出しインデックス（SessionStartフック）** — セッション開始時に
    「全ページのタイトル＋1行要約」だけを自動でAIの視界に注入。本文は関連する
    作業のときにAIが自分で開く。軽いのに、道具が「感覚」に変わる
 2. **運用契約（スキーマ）** — 何を記録し、何を記録しないか。日常作業の中で
    エージェントが自発的にWikiを育てるルールまで含む
+3. **コンパクション耐性（PreCompactフック＋1行ジャーナル）** — 長いセッションの
+   要約（コンパクション）は「何をしたか」を残し「なぜ・細部・失敗過程」＝知見の
+   肉を削ります。しかも知見が一番溜まった瞬間と消える直前は同じタイミング。
+   要約直前に保全指示を自動注入し、迷った知見は `.wiki/inbox/journal.md` に
+   1行だけ先行ログ（WAL）として落とす運用で、知見が要約を跨いで生き残ります
 
 ## 5分セットアップ（Claude Code）
 
@@ -29,9 +34,9 @@ Copy-Item -Recurse template\.wiki <あなたのワークスペース>\.wiki
 pwsh -File scripts\llm-wiki.ps1 init -WikiRoot <あなたのワークスペース>\.wiki
 ```
 
-### 2. 呼び出しインデックスを配線
+### 2. フックを配線
 
-`hooks/wiki_index_hook.py` を好きな場所に置き、`~/.claude/settings.json` に:
+`hooks/` の2ファイルを好きな場所に置き、`~/.claude/settings.json` に:
 
 ```json
 {
@@ -47,12 +52,29 @@ pwsh -File scripts\llm-wiki.ps1 init -WikiRoot <あなたのワークスペー�
           }
         ]
       }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python",
+            "args": ["<置いた場所>/precompact_hook.py"],
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }
 ```
 
-フックはカレントディレクトリから上へ辿って最初の `.wiki/` を自動発見します
+- **wiki_index_hook.py（SessionStart）** — セッション開始時に索引を注入
+- **precompact_hook.py（PreCompact）** — コンパクション直前に「wiki級知見の詳細を
+  要約に残せ／要約後の最初のターンで未記録分を書き出せ」の二段指示を注入。
+  発火すると「📚 wiki級知見の保全指示を要約者へ注入」と表示されます
+
+どちらもカレントディレクトリから上へ辿って最初の `.wiki/` を自動発見します
 （gitと同じ流儀・環境変数 `LLM_WIKI_ROOT` で固定も可）。`.wiki/` が見つからない
 場所では黙って何もしません。
 
@@ -87,9 +109,10 @@ pwsh -File scripts\llm-wiki.ps1 init -WikiRoot <あなたのワークスペー�
 
 ```
 hooks/wiki_index_hook.py     呼び出しインデックス（SessionStartフック・依存ゼロ）
+hooks/precompact_hook.py     知見保全指示の注入（PreCompactフック・依存ゼロ）
 scripts/llm-wiki.ps1         メンテCLI: init / status / ingest / reindex / lint
 commands/wiki-*.md           Claude Code スラッシュコマンド6本
-template/.wiki/              Wikiの雛形（スキーマ＋サンプルページ入り）
+template/.wiki/              Wikiの雛形（スキーマ＋WALジャーナル＋サンプルページ入り）
 ```
 
 ## Windowsの注意
