@@ -1,0 +1,7 @@
+{
+  "items": [
+    { "type": "file", "path": "wiki/concepts/LlmWikiPattern.md", "title": "📖 サンプルページ（書き方の見本）" },
+    { "type": "file", "path": "inbox/journal.md", "title": "📥 WALジャーナル" },
+    { "type": "file", "path": "schema/AGENTS.llm-wiki.md", "title": "📐 スキーマ（運用契約）" }
+  ]
+}

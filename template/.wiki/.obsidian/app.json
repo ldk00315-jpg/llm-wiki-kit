@@ -1,0 +1,13 @@
+{
+  "useMarkdownLinks": false,
+  "newLinkFormat": "shortest",
+  "alwaysUpdateLinks": true,
+  "newFileLocation": "folder",
+  "newFileFolderPath": "inbox",
+  "attachmentFolderPath": "assets",
+  "showUnsupportedFiles": false,
+  "strictLineBreaks": false,
+  "readableLineLength": true,
+  "promptDelete": true,
+  "trashOption": "system"
+}

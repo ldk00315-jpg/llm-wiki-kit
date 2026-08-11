@@ -105,6 +105,32 @@ pwsh -File scripts\llm-wiki.ps1 init -WikiRoot <あなたのワークスペー�
 「日常作業の中でいつ・何を記録するか」の基準が書いてあるので、CLAUDE.md 等から
 参照させると、明示的な指示なしでもWikiが育ち始めます。
 
+## Obsidianで見る（任意・おまけ）
+
+Wikiの実体はただのMarkdownフォルダなので、[Obsidian](https://obsidian.md/) で
+「フォルダをVaultとして開く」だけで人間用のビューアになります。テンプレには
+設定済みの `.obsidian/` を同梱してあり、開いた瞬間から：
+
+- **グラフビュー**（`Ctrl+G`）が色分け済み — 🔴 syntheses（蒸留・地図）／
+  🟢 concepts（個別知見）／🟠 overview（入口）。`raw/`・索引・ログは
+  初期フィルタで非表示＝**知識のネットワークだけ**が見える
+- **ブックマーク**にサンプルページ・WALジャーナル・スキーマを登録済み
+- `[[wikilink]]` 記法を維持（Markdownリンクへ自動変換しない）・
+  ページのリネーム時はリンクが自動追従・新規ノートは `inbox/` に落ちる
+
+グラフの読み方のコツ:
+
+| 見えるもの | 意味 |
+|---|---|
+| 大きいノード | リンクが多い＝ハブ。育つと syntheses（地図ページ）がここに来るのが健全 |
+| 薄い灰色のノード | **リンク先が存在しない壊れた `[[wikilink]]`**。掃除リストが目で見える |
+| どこにも繋がらない孤立ノード | どの地図からも参照されていないページ。統合か削除の候補 |
+
+**Obsidianはあくまで人間側の観測装置で、実行時依存ではありません。**
+エージェント側の読み書き・フック・CLIはObsidian無しで完結します（入れなくても
+何も欠けない）。Dataview等のプラグイン固有記法を本文に書き込むとエージェントには
+ノイズになるので、使う場合も索引系ページに閉じるのがおすすめです。
+
 ## 構成
 
 ```
@@ -113,6 +139,7 @@ hooks/precompact_hook.py     知見保全指示の注入（PreCompactフック�
 scripts/llm-wiki.ps1         メンテCLI: init / status / ingest / reindex / lint
 commands/wiki-*.md           Claude Code スラッシュコマンド6本
 template/.wiki/              Wikiの雛形（スキーマ＋WALジャーナル＋サンプルページ入り）
+template/.wiki/.obsidian/    Obsidian用の設定済みVault構成（任意・無くても動く）
 ```
 
 ## Windowsの注意
