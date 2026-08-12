@@ -55,8 +55,15 @@ def read_stdin_event() -> dict:
     try:
         if sys.stdin.isatty():
             return {}
-        # PowerShell 5.1 のパイプはBOM(U+FEFF)を先頭に付けることがある
-        raw = sys.stdin.read().lstrip("﻿").strip()
+        # バイトで読む: sys.stdin.encoding はlocale依存(cp1252等)で、ホストが
+        # 送るUTF-8 JSONを化かすことがある。またPowerShell(.NET)のパイプは
+        # UTF-8 BOM(EF BB BF)を先頭に付けることがある(コンソール設定依存)。
+        # バイトレベルでBOMを剥がし、localeと無関係にUTF-8でデコードする
+        raw_b = sys.stdin.buffer.read()
+        utf8_bom = bytes([0xEF, 0xBB, 0xBF])
+        while raw_b.startswith(utf8_bom):
+            raw_b = raw_b[3:]
+        raw = raw_b.decode("utf-8", errors="replace").lstrip("﻿").strip()
         return json.loads(raw) if raw else {}
     except Exception:
         return {}
