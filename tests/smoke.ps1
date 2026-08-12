@@ -37,13 +37,18 @@ function Invoke-PyHook {
     $psi.UseShellExecute = $false
     $psi.RedirectStandardInput = $true
     $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
     $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
     $p = [System.Diagnostics.Process]::Start($psi)
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($Json)
     $p.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
     $p.StandardInput.Close()
     $out = $p.StandardOutput.ReadToEnd()
+    $err = $p.StandardError.ReadToEnd()
     $p.WaitForExit()
+    if ($err) { Write-Output "HOOK-STDERR: $err" }
+    $script:LastHookExit = $p.ExitCode
     return $out
 }
 
@@ -171,7 +176,15 @@ try {
         $event = '{"trigger":"auto","transcript_path":"C:\\Users\\secret\\session.jsonl"}'
         Invoke-PyHook $py.Source (Join-Path $hookDir "precompact_hook.py") $event $work | Out-Null
         $journal = Get-Content (Join-Path $root "inbox\journal.md") -Raw -Encoding UTF8
-        Assert ($journal -match "PreCompact境界（auto）") "precompact hook appends boundary marker"
+        $markerOk = $journal -match "PreCompact境界（auto）"
+        if (-not $markerOk) {
+            # CI診断: 何が起きたかを可視化する
+            Write-Output "DIAG: py=$($py.Source) exit=$script:LastHookExit work=$work"
+            Write-Output "DIAG: journal tail: $($journal.Substring([Math]::Max(0, $journal.Length - 300)))"
+            $diag = Join-Path $root "diagnostics\hooks.log"
+            if (Test-Path $diag) { Write-Output "DIAG: hooks.log: $(Get-Content $diag -Raw -Encoding UTF8)" } else { Write-Output "DIAG: no hooks.log" }
+        }
+        Assert $markerOk "precompact hook appends boundary marker"
         Assert ($journal -notmatch "secret") "transcript path NOT persisted to journal (R-06)"
         $recov = Invoke-PyHook $py.Source (Join-Path $hookDir "wiki_index_hook.py") '{"source":"compact"}' $work
         Assert ($recov -match "コンパクション直後の回復指示") "index hook injects compact recovery"
