@@ -25,14 +25,14 @@ function Assert {
     }
 }
 
-function Invoke-PyHook {
-    param([string]$PyExe, [string]$Script, [string]$Json, [string]$Cwd)
+function Invoke-PyRaw {
+    param([string]$PyExe, [string]$Arguments, [string]$Json, [string]$Cwd)
 
     # PowerShellパイプの暗黙エンコーディング（$OutputEncoding / BOM付与）に
     # 依存しないよう、Processでstdinへ生UTF-8バイトを直接書き込む
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $PyExe
-    $psi.Arguments = '"' + $Script + '"'
+    $psi.Arguments = $Arguments
     $psi.WorkingDirectory = $Cwd
     $psi.UseShellExecute = $false
     $psi.RedirectStandardInput = $true
@@ -50,6 +50,11 @@ function Invoke-PyHook {
     if ($err) { Write-Output "HOOK-STDERR: $err" }
     $script:LastHookExit = $p.ExitCode
     return $out
+}
+
+function Invoke-PyHook {
+    param([string]$PyExe, [string]$Script, [string]$Json, [string]$Cwd)
+    return Invoke-PyRaw $PyExe ('"' + $Script + '"') $Json $Cwd
 }
 
 try {
@@ -180,6 +185,10 @@ try {
         if (-not $markerOk) {
             # CI診断: 何が起きたかを可視化する
             Write-Output "DIAG: py=$($py.Source) exit=$script:LastHookExit work=$work"
+            $childCwd = Invoke-PyRaw $py.Source '-c "import os;print(os.getcwd())"' "" $work
+            Write-Output "DIAG: child cwd = $($childCwd.Trim()) (expected: $work)"
+            $childEnv = Invoke-PyRaw $py.Source '-c "import os;print(os.environ.get(chr(76)+chr(76)+chr(77)+chr(95)+chr(87)+chr(73)+chr(75)+chr(73)+chr(95)+chr(82)+chr(79)+chr(79)+chr(84), chr(45)))"' "" $work
+            Write-Output "DIAG: LLM_WIKI_ROOT in child = $($childEnv.Trim())"
             Write-Output "DIAG: journal tail: $($journal.Substring([Math]::Max(0, $journal.Length - 300)))"
             $diag = Join-Path $root "diagnostics\hooks.log"
             if (Test-Path $diag) { Write-Output "DIAG: hooks.log: $(Get-Content $diag -Raw -Encoding UTF8)" } else { Write-Output "DIAG: no hooks.log" }
