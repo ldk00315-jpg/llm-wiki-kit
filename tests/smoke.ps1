@@ -189,6 +189,8 @@ try {
             Write-Output "DIAG: child cwd = $($childCwd.Trim()) (expected: $work)"
             $childEnv = Invoke-PyRaw $py.Source '-c "import os;print(os.environ.get(chr(76)+chr(76)+chr(77)+chr(95)+chr(87)+chr(73)+chr(75)+chr(73)+chr(95)+chr(82)+chr(79)+chr(79)+chr(84), chr(45)))"' "" $work
             Write-Output "DIAG: LLM_WIKI_ROOT in child = $($childEnv.Trim())"
+            $stdinRepr = Invoke-PyRaw $py.Source '-c "import sys;print(sys.stdin.encoding);print(repr(sys.stdin.read()))"' $event $work
+            Write-Output "DIAG: child stdin = $stdinRepr"
             Write-Output "DIAG: journal tail: $($journal.Substring([Math]::Max(0, $journal.Length - 300)))"
             $diag = Join-Path $root "diagnostics\hooks.log"
             if (Test-Path $diag) { Write-Output "DIAG: hooks.log: $(Get-Content $diag -Raw -Encoding UTF8)" } else { Write-Output "DIAG: no hooks.log" }
