@@ -79,16 +79,20 @@ def log_failure(root: Path | None, message: str) -> None:
 import re
 
 
+def _unescape(m):
+    c = m.group(1)
+    if c in ("n", "t", "r"):
+        return {"n": "\n", "t": "\t", "r": "\r"}[c]
+    if c in ('"', "\\"):
+        return c
+    return m.group(0)  # 未知のエスケープは変形せず原文のまま残す
+
+
 def _decode_scalar(value: str) -> str:
     """CLIの ConvertTo-YamlScalar と対称のデコード（依存ゼロ）。"""
     v = value.strip()
     if len(v) >= 2 and v.startswith('"') and v.endswith('"'):
-        inner = v[1:-1]
-        return re.sub(
-            r"\\(.)",
-            lambda m: {"n": "\n", "t": "\t"}.get(m.group(1), m.group(1)),
-            inner,
-        )
+        return re.sub(r"\\(.)", _unescape, v[1:-1])
     if len(v) >= 2 and v.startswith("'") and v.endswith("'"):
         return v[1:-1].replace("''", "'")
     return v
@@ -143,8 +147,10 @@ def main():
             if page.name.startswith("_"):
                 continue
             title, summary = frontmatter(page)
-            title = (title or page.stem).replace("\n", " ").replace("\t", " ")
-            summary = summary.replace("\n", " ").replace("\t", " ")
+            title = (title or page.stem)
+            for ws in ("\r\n", "\r", "\n", "\t"):
+                title = title.replace(ws, " ")
+                summary = summary.replace(ws, " ")
             if len(summary) > MAX_SUMMARY:
                 summary = summary[:MAX_SUMMARY] + "…"
             rel = page.relative_to(root.parent)
@@ -156,7 +162,17 @@ def main():
             f"[LLM Wiki索引（自動注入・SessionStart）] 過去の判断・罠・パターンの目録。"
             f"関連しそうな作業のときは該当ページを {root} 配下からReadで開くこと:"
         )
-        budget = MAX_OUTPUT - sum(len(b) + 1 for b in blocks) - len(header) - 1
+        # footer（省略通知）と改行の分を先に予約し、総出力を MAX_OUTPUT 以内に収める
+        footer_reserve = len(
+            f"\n…（表示予算のため残り{len(entries)}件を省略。"
+            f"全索引: {root / 'wiki' / '_index.md'}）"
+        )
+        budget = (
+            MAX_OUTPUT
+            - sum(len(b) + 1 for b in blocks)
+            - len(header) - 1
+            - footer_reserve
+        )
         shown = []
         used = 0
         for e in entries:
@@ -174,7 +190,10 @@ def main():
         blocks.append(body)
 
     if blocks:
-        print("\n".join(blocks))
+        out = "\n".join(blocks)
+        if len(out) > MAX_OUTPUT:  # 不変条件の最終防衛線
+            out = out[:MAX_OUTPUT]
+        print(out)
 
 
 if __name__ == "__main__":

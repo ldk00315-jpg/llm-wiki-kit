@@ -6,9 +6,10 @@ on:
   pull_request:
 
 jobs:
-  smoke-windows:
+  smoke-windows-ps51:
     runs-on: windows-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.13"]
     steps:
@@ -19,6 +20,18 @@ jobs:
       - name: Smoke tests (Windows PowerShell 5.1)
         shell: powershell
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\smoke.ps1
+
+  smoke-windows-pwsh:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
       - name: Smoke tests (PowerShell 7)
         shell: pwsh
         run: pwsh -File tests/smoke.ps1
@@ -26,6 +39,7 @@ jobs:
   hooks-linux:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.13"]
     steps:
@@ -47,4 +61,25 @@ jobs:
           echo "$out" | grep -q "コンパクション直後の回復指示"
           out2=$(python "$GITHUB_WORKSPACE/hooks/wiki_index_hook.py" < /dev/null)
           echo "$out2" | grep -q "LLM Wiki索引"
-          echo "hooks-linux: all assertions passed"
+          echo "hooks-linux: basic assertions passed"
+      - name: Output budget invariant (V-05)
+        run: |
+          set -e
+          work=$(mktemp -d)
+          cp -r template/.wiki "$work/.wiki"
+          cd "$work"
+          for i in $(seq 1 200); do
+            printf -- '---\ntitle: "Test Page %03d with a reasonably long descriptive name"\nsummary: "A fairly long summary line describing traps and patterns measured in production so the entry is realistically sized for budget testing purposes here."\n---\nbody\n' "$i" \
+              > ".wiki/wiki/concepts/TestPage$i.md"
+          done
+          python - "$GITHUB_WORKSPACE" <<'EOF'
+          import subprocess, sys
+          out = subprocess.run(
+              [sys.executable, sys.argv[1] + "/hooks/wiki_index_hook.py"],
+              capture_output=True, text=True, stdin=subprocess.DEVNULL,
+          ).stdout.rstrip("\n")
+          n = len(out)
+          assert n <= 8000, f"budget exceeded: {n} chars"
+          assert "省略" in out, "truncation notice missing"
+          print(f"budget OK: {n} chars <= 8000")
+          EOF

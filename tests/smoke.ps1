@@ -25,6 +25,28 @@ function Assert {
     }
 }
 
+function Invoke-PyHook {
+    param([string]$PyExe, [string]$Script, [string]$Json, [string]$Cwd)
+
+    # PowerShellパイプの暗黙エンコーディング（$OutputEncoding / BOM付与）に
+    # 依存しないよう、Processでstdinへ生UTF-8バイトを直接書き込む
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $PyExe
+    $psi.Arguments = '"' + $Script + '"'
+    $psi.WorkingDirectory = $Cwd
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Json)
+    $p.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
+    $p.StandardInput.Close()
+    $out = $p.StandardOutput.ReadToEnd()
+    $p.WaitForExit()
+    return $out
+}
+
 try {
     New-Item -ItemType Directory -Force $work | Out-Null
     Copy-Item -Recurse (Join-Path $repo "template\.wiki") (Join-Path $work ".wiki")
@@ -65,7 +87,7 @@ try {
     Set-Content -Path $brokenPath -Value @("---", "title: broken: unquoted", "---", "", "body") -Encoding UTF8
     $lintOut2 = & $cli -Command lint -WikiRoot $root 2>&1
     $global:LASTEXITCODE = 0  # reset for later assertions
-    Assert (($lintOut2 -join "`n") -match "Unquoted colon") "lint detects unquoted colon in raw title"
+    Assert (($lintOut2 -join "`n") -match "Unquoted 'colon\+space'") "lint detects unquoted colon+space in raw title"
     Remove-Item $brokenPath -Force
 
     # --- T7: status は存在しない root を作らない（read-only） ---
@@ -101,13 +123,40 @@ try {
     Assert (($lintOut3 -join "`n") -match "Unterminated frontmatter") "lint detects unterminated frontmatter"
     Remove-Item $unterm -Force
 
-    # --- T12: lint が不正エスケープを検出する (R-04) ---
+    # --- T12: lint が方言外エスケープを検出する (R-04/V-04) ---
     $badesc = Join-Path $root "raw\2026-01-03-badescape.md"
     Set-Content -Path $badesc -Value @("---", 'title: "invalid\q escape"', "---", "", "body") -Encoding UTF8
     $lintOut4 = & $cli -Command lint -WikiRoot $root 2>&1
     $global:LASTEXITCODE = 0
-    Assert (($lintOut4 -join "`n") -match "Invalid escape") "lint detects invalid escape in quoted title"
+    Assert (($lintOut4 -join "`n") -match "Escape outside kit scalar dialect") "lint detects out-of-dialect escape in raw title"
     Remove-Item $badesc -Force
+
+    # --- T12b: wiki側の方言外エスケープも検出する (V-03) ---
+    $badWiki = Join-Path $root "wiki\concepts\BadEscape.md"
+    Set-Content -Path $badWiki -Value @("---", 'title: "invalid\q escape"', 'summary: "s"', "sources: []", "---", "", "body") -Encoding UTF8
+    $lintOut4b = & $cli -Command lint -WikiRoot $root 2>&1
+    $global:LASTEXITCODE = 0
+    Assert (($lintOut4b -join "`n") -match "Escape outside kit scalar dialect in title: wiki/concepts/BadEscape.md") "lint detects out-of-dialect escape on wiki side"
+    Remove-Item $badWiki -Force
+
+    # --- T12c: 単独CR入りタイトルの往復 (V-02) ---
+    & $cli -Command ingest -WikiRoot $root -Text "body" -Title "left`rright" | Out-Null
+    $crRaw = Get-ChildItem (Join-Path $root "raw\*.md") | Where-Object { $_.Name -like "*left-right*" } | Select-Object -First 1
+    $crLine = (Get-Content $crRaw.FullName -Encoding UTF8)[1]
+    Assert ($crLine -eq 'title: "left\rright"') "lone CR escaped as \r in YAML ($crLine)"
+    $indexContent2 = Get-Content (Join-Path $root "raw\_index.md") -Raw -Encoding UTF8
+    Assert ($indexContent2 -match "\[left right\]\(") "lone CR flattened to space in index label"
+    $lintOutCr = & $cli -Command lint -WikiRoot $root 2>&1
+    $global:LASTEXITCODE = 0
+    Assert (($lintOutCr -join "`n") -match "OK") "lint passes with \r-escaped title (valid dialect)"
+
+    # --- T12d: URLコロン入りの引用符なしtitleは誤検出しない ---
+    $urlRaw = Join-Path $root "raw\2026-01-04-url.md"
+    Set-Content -Path $urlRaw -Value @("---", "title: https://example.com/page", "---", "", "body") -Encoding UTF8
+    $lintOutUrl = & $cli -Command lint -WikiRoot $root 2>&1
+    $global:LASTEXITCODE = 0
+    Assert (($lintOutUrl -join "`n") -notmatch "colon\+space.*url") "no false positive on plain URL title"
+    Remove-Item $urlRaw -Force
 
     # --- T13: 制御文字入りタイトルがYAMLに漏れない (R-04) ---
     & $cli -Command ingest -WikiRoot $root -Text "body" -Title "bell$([char]7)title" | Out-Null
@@ -115,28 +164,21 @@ try {
     $bellContent = Get-Content $bellRaw.FullName -Raw -Encoding UTF8
     Assert (-not ($bellContent.Contains([string][char]7))) "C0 control char stripped from YAML"
 
-    # --- T14-16: Pythonフック（python が無い環境ではスキップ） ---
+    # --- T14-17: Pythonフック（python が無い環境ではスキップ） ---
     $py = Get-Command python -ErrorAction SilentlyContinue
     if ($py) {
         $hookDir = Join-Path $repo "hooks"
-        # PS 5.1は外部プロセスのstdoutを既定でCP932デコードする → UTF-8に切替
-        $prevEnc = [Console]::OutputEncoding
-        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-        # journal が無い状態から PreCompact マーカー追記
         $event = '{"trigger":"auto","transcript_path":"C:\\Users\\secret\\session.jsonl"}'
-        $prevCwd = Get-Location
-        Set-Location $work
-        try {
-            $event | & $py.Source (Join-Path $hookDir "precompact_hook.py") | Out-Null
-            $journal = Get-Content (Join-Path $root "inbox\journal.md") -Raw -Encoding UTF8
-            Assert ($journal -match "PreCompact境界（auto）") "precompact hook appends boundary marker"
-            Assert ($journal -notmatch "secret") "transcript path NOT persisted to journal (R-06)"
-            $recov = '{"source":"compact"}' | & $py.Source (Join-Path $hookDir "wiki_index_hook.py")
-            Assert (($recov -join "`n") -match "コンパクション直後の回復指示") "index hook injects compact recovery"
-        } finally {
-            Set-Location $prevCwd
-            [Console]::OutputEncoding = $prevEnc
-        }
+        Invoke-PyHook $py.Source (Join-Path $hookDir "precompact_hook.py") $event $work | Out-Null
+        $journal = Get-Content (Join-Path $root "inbox\journal.md") -Raw -Encoding UTF8
+        Assert ($journal -match "PreCompact境界（auto）") "precompact hook appends boundary marker"
+        Assert ($journal -notmatch "secret") "transcript path NOT persisted to journal (R-06)"
+        $recov = Invoke-PyHook $py.Source (Join-Path $hookDir "wiki_index_hook.py") '{"source":"compact"}' $work
+        Assert ($recov -match "コンパクション直後の回復指示") "index hook injects compact recovery"
+        # BOM付きstdinでもparseできる（PS 5.1パイプ経路の回帰）
+        Invoke-PyHook $py.Source (Join-Path $hookDir "precompact_hook.py") ($([char]0xFEFF) + '{"trigger":"manual"}') $work | Out-Null
+        $journal2 = Get-Content (Join-Path $root "inbox\journal.md") -Raw -Encoding UTF8
+        Assert ($journal2 -match "PreCompact境界（manual）") "hook parses BOM-prefixed stdin"
     } else {
         Write-Output "SKIP: python not found - hook tests skipped"
     }

@@ -43,6 +43,7 @@ function ConvertTo-YamlScalar {
     $escaped = $Value -replace '\\', '\\'
     $escaped = $escaped -replace '"', '\"'
     $escaped = $escaped -replace "`r`n", '\n'
+    $escaped = $escaped -replace "`r", '\r'
     $escaped = $escaped -replace "`n", '\n'
     $escaped = $escaped -replace "`t", '\t'
     # YAMLはC0制御文字（TAB/LF/CR以外）を非エスケープでは許さない。
@@ -61,11 +62,12 @@ function ConvertFrom-YamlScalar {
         $inner = $v.Substring(1, $v.Length - 2)
         return [regex]::Replace($inner, '\\(.)', {
             param($m)
-            switch ($m.Groups[1].Value) {
-                'n' { "`n" }
-                't' { "`t" }
-                default { $m.Groups[1].Value }
-            }
+            $c = $m.Groups[1].Value
+            if ($c -eq 'n') { "`n" }
+            elseif ($c -eq 't') { "`t" }
+            elseif ($c -eq 'r') { "`r" }
+            elseif ($c -eq '"' -or $c -eq '\') { $c }
+            else { $m.Value }  # 未知のエスケープは変形せず原文のまま残す
         })
     }
     if ($v.Length -ge 2 -and $v.StartsWith("'") -and $v.EndsWith("'")) {
@@ -78,8 +80,8 @@ function ConvertTo-MarkdownLabel {
     param([string]$Value)
 
     # Markdownリンクのラベル用: バックスラッシュ→角括弧の順でエスケープし、
-    # 改行を潰す（順序が逆だと角括弧用の\が二重エスケープされる）
-    $flat = $Value -replace "`r`n", " " -replace "`n", " "
+    # 改行（CRLF・CR単独・LF）を潰す（順序が逆だと角括弧用の\が二重エスケープされる）
+    $flat = $Value -replace "`r`n", " " -replace "`r", " " -replace "`n", " "
     $flat = $flat -replace '\\', '\\'
     return $flat -replace '([\[\]])', '\$1'
 }
@@ -418,7 +420,7 @@ function Invoke-Ingest {
         $kind = "file"
     }
 
-    $h1Title = $SourceTitle -replace "`r`n", " " -replace "`n", " "
+    $h1Title = $SourceTitle -replace "`r`n", " " -replace "`r", " " -replace "`n", " "
     $h1Title = [regex]::Replace($h1Title, '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '')
     $lines = @(
         "---",
@@ -464,21 +466,50 @@ function Invoke-Lint {
         }
     }
 
+    # frontmatter共通検査（raw / wiki 両方に適用）
+    $checkFrontmatter = {
+        param([string]$content, [string]$rel, $issues)
+
+        if ($content -notmatch "(?s)^---\r?\n.*?\r?\n---(\r?\n|$)") {
+            $issues.Add("Unterminated frontmatter (no closing ---): $rel")
+        }
+        foreach ($key in @("title", "summary")) {
+            # 引用符なし値の「コロン+空白/行末」→ YAML mappingと誤認され不正
+            # （コロン単体はplain scalarで正当: URL等を誤検出しない）
+            if ($content -match "(?m)^${key}:\s*(?!`")[^`"\r\n]*:(\s|\r|$)") {
+                $issues.Add("Unquoted 'colon+space' in ${key} (invalid YAML): $rel")
+            }
+            $qm = [regex]::Match($content, "(?m)^${key}:\s*`"(.*)`"\s*$")
+            if ($qm.Success) {
+                # kitのスカラー方言（\n \t \r \" \\）の外にあるエスケープ。
+                # \uXXXX等のYAML正当エスケープも方言外として報告する（生成器は出さない）
+                if ([regex]::IsMatch($qm.Groups[1].Value, '\\(?![ntr"\\])')) {
+                    $issues.Add("Escape outside kit scalar dialect in ${key}: $rel")
+                }
+            }
+        }
+        # YAMLが非エスケープでは許さないC0制御文字（TAB/LF/CR以外）
+        $head = $content.Substring(0, [Math]::Min($content.Length, 2000))
+        if ([regex]::IsMatch($head, '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]')) {
+            $issues.Add("Control character in frontmatter region: $rel")
+        }
+    }
+
     $articleFiles = @(Get-ChildItem -LiteralPath (Join-Path $Root "wiki") -File -Filter "*.md" -Recurse | Where-Object { $_.Name -ne "_index.md" })
     foreach ($file in $articleFiles) {
         $rel = Get-RelativeWikiPath $Root $file.FullName
         $content = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8
         if (-not $content.StartsWith("---")) {
             $issues.Add("Missing frontmatter: $rel")
-        } elseif ($content -notmatch "(?s)^---\r?\n.*?\r?\n---(\r?\n|$)") {
-            $issues.Add("Unterminated frontmatter (no closing ---): $rel")
+            continue
         }
+        & $checkFrontmatter $content $rel $issues
         if ($content -notmatch "(?m)^sources:\s*(\[.*\]|\r?\n(\s+-\s.+\r?\n)+)") {
             $issues.Add("Missing sources frontmatter: $rel")
         }
     }
 
-    # raw の frontmatter 破損検査
+    # raw の frontmatter 破損検査（同じ共通検査）
     $rawDir = Join-Path $Root "raw"
     if (Test-Path $rawDir) {
         $rawFiles = @(Get-ChildItem -LiteralPath $rawDir -File -Filter "*.md" -Recurse | Where-Object { $_.Name -ne "_index.md" })
@@ -489,25 +520,7 @@ function Invoke-Lint {
                 $issues.Add("Raw file missing frontmatter: $rel")
                 continue
             }
-            if ($content -notmatch "(?s)^---\r?\n.*?\r?\n---(\r?\n|$)") {
-                $issues.Add("Unterminated frontmatter (no closing ---): $rel")
-            }
-            if ($content -match "(?m)^title:\s*(?!`")([^`"\r\n]*:.*)$") {
-                # 引用符なしtitleにコロン → YAMLとして不正な可能性が高い
-                $issues.Add("Unquoted colon in title (invalid YAML): $rel")
-            }
-            $titleMatch = [regex]::Match($content, "(?m)^title:\s*`"(.*)`"\s*$")
-            if ($titleMatch.Success) {
-                $quoted = $titleMatch.Groups[1].Value
-                # 二重引用符スカラー内の不正エスケープ（\n \t \" \\ 以外）
-                if ([regex]::IsMatch($quoted, '\\(?![nt"\\])')) {
-                    $issues.Add("Invalid escape in quoted title: $rel")
-                }
-            }
-            # YAMLが許さないC0制御文字（TAB以外）
-            if ([regex]::IsMatch($content.Substring(0, [Math]::Min($content.Length, 2000)), '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]')) {
-                $issues.Add("Control character in frontmatter region: $rel")
-            }
+            & $checkFrontmatter $content $rel $issues
         }
     }
 
