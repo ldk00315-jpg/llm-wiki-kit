@@ -6,7 +6,7 @@ Rewrite `.wiki/wiki/overview.md` so it reflects the current state of the wiki. T
 
 ## Inputs
 
-Read `.wiki/wiki/sources/_index.md`, `entities/_index.md`, `concepts/_index.md`, and the Open Questions section of the existing `overview.md`.
+Read `.wiki/wiki/_index.md`（全カテゴリのカタログ）and the Open Questions section of the existing `overview.md`.
 
 ## Output sections
 

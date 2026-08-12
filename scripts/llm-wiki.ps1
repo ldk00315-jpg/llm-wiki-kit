@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Position = 0)]
     [ValidateSet("init", "status", "ingest", "reindex", "lint")]
@@ -24,9 +24,36 @@ function New-Slug {
     $slug = [regex]::Replace($slug, "[^a-z0-9]+", "-")
     $slug = $slug.Trim("-")
     if ([string]::IsNullOrWhiteSpace($slug)) {
-        $slug = "source"
+        # 非ASCIIタイトル（日本語等）はASCII slugに退化する。無情報な固定名
+        # "source" で衝突・意味喪失させず、タイトルのハッシュで識別可能にする
+        $md5 = [System.Security.Cryptography.MD5]::Create()
+        $bytes = $md5.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Value))
+        $hex = -join ($bytes[0..2] | ForEach-Object { $_.ToString("x2") })
+        $slug = "note-$hex"
     }
     return $slug
+}
+
+function ConvertTo-YamlScalar {
+    param([string]$Value)
+
+    # 依存ゼロのYAMLエスケープ: 常に二重引用符スカラーとして出力する。
+    # コロン・引用符・改行・バックスラッシュを含む正当なタイトルでも
+    # frontmatterが壊れない（YAML double-quoted styleの仕様に準拠）
+    $escaped = $Value -replace '\\', '\\'
+    $escaped = $escaped -replace '"', '\"'
+    $escaped = $escaped -replace "`r`n", '\n'
+    $escaped = $escaped -replace "`n", '\n'
+    $escaped = $escaped -replace "`t", '\t'
+    return '"' + $escaped + '"'
+}
+
+function ConvertTo-MarkdownLabel {
+    param([string]$Value)
+
+    # Markdownリンクのラベル用: 角括弧をエスケープし、改行を潰す
+    $flat = $Value -replace "`r`n", " " -replace "`n", " "
+    return $flat -replace '([\[\]])', '\$1'
 }
 
 function Ensure-Wiki {
@@ -64,6 +91,19 @@ function Get-RelativeWikiPath {
         return $full.Substring($rootFull.Length + 1).Replace("\", "/")
     }
     return $full.Replace("\", "/")
+}
+
+function Get-IndexCreated {
+    param(
+        [string]$Path,
+        [string]$Fallback
+    )
+
+    if (Test-Path $Path) {
+        $existing = Get-FrontmatterValue $Path "created"
+        if ($existing) { return $existing }
+    }
+    return $Fallback
 }
 
 function Get-FrontmatterValue {
@@ -135,6 +175,32 @@ function Initialize-Wiki {
             "",
             "Initialized the workspace-local LLM Wiki."
         )
+        (Join-Path $Root "wiki\overview.md") = @(
+            "---",
+            "title: Workspace Overview",
+            "summary: Living synthesis and entry point for this wiki.",
+            "tags: [meta, entry-point]",
+            "sources: []",
+            "created: $today",
+            "updated: $today",
+            "confidence: low",
+            "---",
+            "",
+            "# Workspace Overview",
+            "",
+            "This page is the entry point. Keep it a short, living synthesis:",
+            "which maps (syntheses) exist, what themes recur, what is unresolved.",
+            "Rewrite it as the wiki grows -- an entry point that goes stale stops",
+            "being an entry point.",
+            "",
+            "## Themes",
+            "",
+            "_None yet. After the first captures, list recurring themes here._",
+            "",
+            "## Open Questions",
+            "",
+            "- _None yet._"
+        )
     }
 
     foreach ($path in $files.Keys) {
@@ -157,11 +223,16 @@ function Update-Indexes {
     $rawFiles = @(Get-ChildItem -LiteralPath $rawDir -File -Recurse | Where-Object { $_.Name -ne "_index.md" } | Sort-Object FullName)
     $articleFiles = @(Get-ChildItem -LiteralPath $wikiDir -File -Filter "*.md" -Recurse | Where-Object { $_.Name -ne "_index.md" } | Sort-Object FullName)
 
+    # 索引の created: は既存値を引き継ぐ（無ければ今日＝ハードコードしない）
+    $rawCreated = Get-IndexCreated (Join-Path $rawDir "_index.md") $today
+    $wikiCreated = Get-IndexCreated (Join-Path $wikiDir "_index.md") $today
+    $masterCreated = Get-IndexCreated (Join-Path $Root "_index.md") $today
+
     $rawLines = @(
         "---",
         "title: Raw Sources",
         "summary: Immutable source catalog for the workspace LLM Wiki.",
-        "created: 2026-04-27",
+        "created: $rawCreated",
         "updated: $today",
         "---",
         "",
@@ -176,7 +247,7 @@ function Update-Indexes {
             $title = Get-FrontmatterValue $file.FullName "title"
             if (-not $title) { $title = $file.BaseName }
             $rel = Get-RelativeWikiPath $Root $file.FullName
-            $rawLines += "- [$title](../$rel)"
+            $rawLines += "- [$(ConvertTo-MarkdownLabel $title)](../$rel)"
         }
     }
 
@@ -184,15 +255,17 @@ function Update-Indexes {
         "---",
         "title: Synthesized Wiki",
         "summary: Catalog of LLM-maintained synthesis pages.",
-        "created: 2026-04-27",
+        "created: $wikiCreated",
         "updated: $today",
         "---",
         "",
         "# Synthesized Wiki",
-        "",
-        "- [Overview](overview.md)",
         ""
     )
+    if (Test-Path (Join-Path $wikiDir "overview.md")) {
+        $wikiLines += "- [Overview](overview.md)"
+        $wikiLines += ""
+    }
 
     $categories = @(
         @{ Name = "Sources";    Dir = "sources" },
@@ -220,7 +293,7 @@ function Update-Indexes {
                 if (-not $title) { $title = $file.BaseName }
                 if (-not $summary) { $summary = "No summary." }
                 $rel = "$($cat.Dir)/$($file.Name)"
-                $wikiLines += "- [$title]($rel) - $summary"
+                $wikiLines += "- [$(ConvertTo-MarkdownLabel $title)]($rel) - $summary"
             }
         }
         $wikiLines += ""
@@ -230,7 +303,7 @@ function Update-Indexes {
         "---",
         "title: Workspace LLM Wiki",
         "summary: Master index for the workspace-local LLM Wiki.",
-        "created: 2026-04-27",
+        "created: $masterCreated",
         "updated: $today",
         "---",
         "",
@@ -317,16 +390,17 @@ function Invoke-Ingest {
         $kind = "file"
     }
 
+    $h1Title = $SourceTitle -replace "`r`n", " " -replace "`n", " "
     $lines = @(
         "---",
-        "title: $SourceTitle",
-        "source: $sourceLabel",
+        "title: $(ConvertTo-YamlScalar $SourceTitle)",
+        "source: $(ConvertTo-YamlScalar $sourceLabel)",
         "kind: $kind",
         "ingested: $today",
         "status: raw",
         "---",
         "",
-        "# $SourceTitle",
+        "# $h1Title",
         "",
         $body
     )
@@ -338,12 +412,22 @@ function Invoke-Ingest {
     Write-Output "Ingested: $target"
 }
 
+function Assert-WikiExists {
+    param([string]$Root)
+
+    # status/lint は読み取り専用: 存在しないWikiを黙って作らない（副作用禁止）
+    if (-not (Test-Path (Join-Path $Root "wiki"))) {
+        Write-Output "ERROR: Wiki root not found: $Root (run 'init' first)"
+        exit 1
+    }
+}
+
 function Invoke-Lint {
     param([string]$Root)
 
-    Ensure-Wiki $Root
+    Assert-WikiExists $Root
     $issues = New-Object System.Collections.Generic.List[string]
-    $required = @("_index.md", "raw/_index.md", "wiki/_index.md", "schema/AGENTS.llm-wiki.md", "log.md")
+    $required = @("_index.md", "raw/_index.md", "wiki/_index.md", "wiki/overview.md", "schema/AGENTS.llm-wiki.md", "log.md")
 
     foreach ($rel in $required) {
         if (-not (Test-Path (Join-Path $Root $rel))) {
@@ -362,6 +446,21 @@ function Invoke-Lint {
         }
     }
 
+    # raw の frontmatter 破損検査: title 行が素朴parserで読めるか
+    $rawDir = Join-Path $Root "raw"
+    if (Test-Path $rawDir) {
+        $rawFiles = @(Get-ChildItem -LiteralPath $rawDir -File -Filter "*.md" -Recurse | Where-Object { $_.Name -ne "_index.md" })
+        foreach ($file in $rawFiles) {
+            $content = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8
+            if (-not $content.StartsWith("---")) {
+                $issues.Add("Raw file missing frontmatter: $(Get-RelativeWikiPath $Root $file.FullName)")
+            } elseif ($content -match "(?m)^title:\s*(?!`")([^`"\r\n]*:.*)$") {
+                # 引用符なしtitleにコロン → YAMLとして不正な可能性が高い
+                $issues.Add("Unquoted colon in title (invalid YAML): $(Get-RelativeWikiPath $Root $file.FullName)")
+            }
+        }
+    }
+
     if ($issues.Count -eq 0) {
         Write-Output "OK: no structural issues found."
     } else {
@@ -376,7 +475,7 @@ switch ($Command) {
         Write-Output "Initialized $WikiRoot"
     }
     "status" {
-        Ensure-Wiki $WikiRoot
+        Assert-WikiExists $WikiRoot
         $rawCount = @(Get-ChildItem -LiteralPath (Join-Path $WikiRoot "raw") -File -Recurse | Where-Object { $_.Name -ne "_index.md" }).Count
         $articleCount = @(Get-ChildItem -LiteralPath (Join-Path $WikiRoot "wiki") -File -Filter "*.md" -Recurse | Where-Object { $_.Name -ne "_index.md" }).Count
         Write-Output "Wiki root: $((Resolve-Path $WikiRoot).Path)"

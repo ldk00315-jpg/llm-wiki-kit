@@ -6,11 +6,16 @@ Run a deterministic structural health check on `.wiki/`. This is the cheap, no-t
 
 ## Steps
 
-1. Run `pwsh -File scripts/llm-wiki.ps1 lint` and capture issues.
-2. Verify each subdirectory `_index.md` exists: `.wiki/_index.md`, `.wiki/raw/_index.md`, `.wiki/wiki/_index.md`, `.wiki/wiki/sources/_index.md`, `.wiki/wiki/entities/_index.md`, `.wiki/wiki/concepts/_index.md`, `.wiki/wiki/syntheses/_index.md`.
-3. Verify every file in `.wiki/wiki/sources/` has a corresponding raw file referenced in its `sources:` frontmatter.
-4. Verify `.wiki/log.md` has an ingest entry for every source page.
-5. List empty stubs (synthesized pages whose body is shorter than ~200 chars).
+1. Run the structural lint and capture issues. Windows PowerShell 5.1:
+   `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/llm-wiki.ps1 lint`
+   (PowerShell 7+: `pwsh -File scripts/llm-wiki.ps1 lint`. If `scripts/llm-wiki.ps1`
+   is not in this project, use the path where llm-wiki-kit is cloned.)
+   The lint already checks: required files (`_index.md`, `raw/_index.md`,
+   `wiki/_index.md`, `wiki/overview.md`, `schema/AGENTS.llm-wiki.md`, `log.md`),
+   frontmatter presence, `sources:` presence, and raw-title YAML validity.
+2. Verify every file in `.wiki/wiki/sources/` has a corresponding raw file referenced in its `sources:` frontmatter.
+3. Verify `.wiki/log.md` has an ingest entry for every source page.
+4. List empty stubs (synthesized pages whose body is shorter than ~200 chars).
 
 ## Output
 

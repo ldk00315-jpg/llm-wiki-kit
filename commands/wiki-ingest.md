@@ -7,7 +7,11 @@ Read `.wiki/schema/AGENTS.llm-wiki.md` first, then ingest `$ARGUMENTS` into the 
 
 ## Steps
 
-1. **Save the raw source.** Run `pwsh -File scripts/llm-wiki.ps1 ingest -Source <path-or-url> -Title <title>` (or `-Text <inline>` for inline content). The helper writes the file into `.wiki/raw/YYYY-MM-DD-<slug>.md` with frontmatter.
+1. **Save the raw source.** Run the ingest helper (Windows PowerShell 5.1:
+   `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/llm-wiki.ps1 ingest -Source <path-or-url> -Title <title>`;
+   PowerShell 7+: `pwsh -File scripts/llm-wiki.ps1 ingest …`; use `-Text <inline>` for inline content.
+   If `scripts/llm-wiki.ps1` is not in this project, use the path where llm-wiki-kit is cloned).
+   The helper writes the file into `.wiki/raw/YYYY-MM-DD-<slug>.md` with frontmatter.
 2. **Read the saved raw file.** Identify durable concepts, named entities, and quotable claims.
 3. **Create or update a source page** at `.wiki/wiki/sources/<slug>.md` with frontmatter `type: source` and a `sources:` list pointing back to the raw file. Include: one-paragraph summary, key claims (bulleted), notable quotes with line/section anchors, and `[[wikilinks]]` to entities and concepts touched.
 4. **Create or update entity pages** at `.wiki/wiki/entities/<TitleCase>.md` (one file per named person, org, product). Each entity page accumulates claims across sources, each claim cited with a `[[wikilink]]` to the source page.

@@ -3,10 +3,10 @@ title: LLM Wiki Pattern
 summary: A local-first knowledge workflow where agents compile raw sources into a persistent, cross-linked Markdown wiki that compounds across sessions.
 type: concept
 tags: [knowledge-management, ai-agents, markdown, example]
-sources: []
+sources: [../../raw/2026-08-05-llm-wiki-kit-design-notes.md]
 created: 2026-08-05
-updated: 2026-08-05
-confidence: high
+updated: 2026-08-12
+confidence: medium
 ---
 
 # LLM Wiki Pattern

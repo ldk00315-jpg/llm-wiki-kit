@@ -5,22 +5,35 @@
 索引（タイトル＋1行要約）を毎セッション自動でAIの視界に入れ、本文は必要時に
 Readで開く2段構え。道具を「感覚」に変えるための受動注入レイヤ。
 
+追加の役割（2026-08-12〜）: コンパクション後の回復注入。
+SessionStart は `source: "compact"` で「要約直後の再開」を公式に通知する。
+このとき precompact_hook.py が inbox/journal.md に書いた境界マーカーを指して
+「未記録知見を書き出せ」という回復指示を索引より先に注入する。
+
 - カレントディレクトリから上へ辿って最初に見つかった `.wiki/` を対象にする
   （gitのリポジトリ探索と同じ流儀。環境変数 LLM_WIKI_ROOT があれば最優先）
 - 各ページのYAMLフロントマターから title / summary を直接読む（索引ファイルは
   経由しない: 正はページ本体）
-- どんな失敗でも黙って何も出さない（フックがセッション開始を壊してはならない）
+- 出力は約8,000文字で打ち切る（ハーネス側の出力上限でファイル退避される前に、
+  自分の意思で予算内に収める。省略時は残件数と全索引のパスを明示する）
+- 失敗時は `.wiki/diagnostics/hooks.log` に記録を試み（それも失敗したら沈黙）、
+  セッション開始を壊さない
 
 Claude Code への配線（~/.claude/settings.json）:
     {"hooks": {"SessionStart": [{"hooks": [{"type": "command",
         "command": "python", "args": ["<このファイルへのパス>"], "timeout": 10}]}]}}
+
+要求ランタイム: Python 3.10+（外部パッケージ依存なし）
 """
+import datetime
+import json
 import os
 import sys
 from pathlib import Path
 
-SECTIONS = ["concepts", "syntheses", "entities", "sources"]
-MAX_SUMMARY = 160
+SECTIONS = ["syntheses", "concepts", "entities", "sources"]
+MAX_SUMMARY = 120
+MAX_OUTPUT = 8000
 
 
 def find_wiki_root() -> Path | None:
@@ -35,6 +48,31 @@ def find_wiki_root() -> Path | None:
         if (candidate / "wiki").is_dir():
             return candidate
     return None
+
+
+def read_stdin_event() -> dict:
+    """フック入力（JSON）を読む。無ければ空dict（手動実行でも壊れない）。"""
+    try:
+        if sys.stdin.isatty():
+            return {}
+        raw = sys.stdin.read()
+        return json.loads(raw) if raw.strip() else {}
+    except Exception:
+        return {}
+
+
+def log_failure(root: Path | None, message: str) -> None:
+    """診断ログへの追記を試みる。失敗しても例外を出さない。"""
+    try:
+        if root is None:
+            return
+        diag = root / "diagnostics"
+        diag.mkdir(exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(diag / "hooks.log", "a", encoding="utf-8") as f:
+            f.write(f"[{stamp}] wiki_index_hook: {message}\n")
+    except Exception:
+        pass
 
 
 def frontmatter(path):
@@ -56,12 +94,30 @@ def frontmatter(path):
     return title, summary
 
 
+def compact_recovery_block(root: Path) -> str:
+    """コンパクション直後（source=="compact"）にだけ出す回復指示。"""
+    journal = root / "inbox" / "journal.md"
+    return (
+        "[コンパクション直後の回復指示（SessionStart source=compact）] "
+        "この会話は直前に要約された。要約は「なぜ・細部・失敗過程」を落とす。"
+        f"最初のターンで {journal} を開き、PreCompact境界マーカーより上の"
+        "未処理エントリと、要約に残っている未記録のwiki級知見を "
+        f"{root} へページ化すること（手順: schema/AGENTS.llm-wiki.md の Auto-capture 節）。"
+    )
+
+
 def main():
     root = find_wiki_root()
     if root is None:
         return
+    event = read_stdin_event()
+
+    blocks = []
+    if event.get("source") == "compact":
+        blocks.append(compact_recovery_block(root))
+
     wiki = root / "wiki"
-    out = []
+    entries = []
     for section in SECTIONS:
         pages = sorted((wiki / section).glob("*.md")) if (wiki / section).is_dir() else []
         for page in pages:
@@ -73,12 +129,32 @@ def main():
                 summary = summary[:MAX_SUMMARY] + "…"
             rel = page.relative_to(root.parent)
             entry = f"- {title} — {summary}" if summary else f"- {title}"
-            out.append(f"{entry} [{rel}]")
-    if not out:
-        return
-    print(f"[LLM Wiki索引（自動注入・SessionStart）] 過去の判断・罠・パターンの目録。"
-          f"関連しそうな作業のときは該当ページを {root} 配下からReadで開くこと:")
-    print("\n".join(out))
+            entries.append(f"{entry} [{rel}]")
+
+    if entries:
+        header = (
+            f"[LLM Wiki索引（自動注入・SessionStart）] 過去の判断・罠・パターンの目録。"
+            f"関連しそうな作業のときは該当ページを {root} 配下からReadで開くこと:"
+        )
+        budget = MAX_OUTPUT - sum(len(b) + 1 for b in blocks) - len(header) - 1
+        shown = []
+        used = 0
+        for e in entries:
+            if used + len(e) + 1 > budget:
+                break
+            shown.append(e)
+            used += len(e) + 1
+        body = header + "\n" + "\n".join(shown)
+        omitted = len(entries) - len(shown)
+        if omitted > 0:
+            body += (
+                f"\n…（表示予算のため残り{omitted}件を省略。"
+                f"全索引: {root / 'wiki' / '_index.md'}）"
+            )
+        blocks.append(body)
+
+    if blocks:
+        print("\n".join(blocks))
 
 
 if __name__ == "__main__":
@@ -87,5 +163,9 @@ if __name__ == "__main__":
         # ハーネスはUTF-8で読むため明示的に揃える
         sys.stdout.reconfigure(encoding="utf-8")
         main()
-    except Exception:
+    except Exception as exc:
+        try:
+            log_failure(find_wiki_root(), repr(exc))
+        except Exception:
+            pass
         sys.exit(0)  # フックは何があってもセッションを壊さない

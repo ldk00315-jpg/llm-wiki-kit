@@ -72,11 +72,11 @@ Use `[[PageName]]` wikilinks for graph navigation. When the link target's path d
 
 Driven by `/wiki-ingest` (see the kit's `commands/wiki-ingest.md`). High-level:
 
-1. Save the raw source via `pwsh -File scripts/llm-wiki.ps1 ingest …`.
+1. Save the raw source via the maintenance CLI (`llm-wiki.ps1 ingest …` — on Windows PowerShell 5.1 run it as `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/llm-wiki.ps1 ingest …`; with PowerShell 7 use `pwsh -File …`).
 2. Read it; extract durable concepts, entities, claims, contradictions, open questions.
 3. Create or update a source page, plus relevant entity and concept pages.
 4. Refresh `wiki/overview.md`.
-5. Reindex via `pwsh -File scripts/llm-wiki.ps1 reindex`.
+5. Reindex via the same CLI: `… llm-wiki.ps1 reindex`.
 6. Append a `## [YYYY-MM-DD] ingest | <title>` entry to `log.md` listing the new/updated pages.
 
 ### Query
@@ -126,7 +126,7 @@ Work produces something the user would want to find again:
 1. Write a raw note directly to `.wiki/raw/YYYY-MM-DD-<kebab-slug>.md` with the raw frontmatter (`title`, `source: workspace`, `kind: workspace-note`, `ingested: YYYY-MM-DD`, `status: raw`). Body is short — bullet points or a paragraph.
 2. Update or create the relevant page in `wiki/concepts/`, `wiki/syntheses/`, or `wiki/entities/`. Cite the new raw file in `sources:` and link to related pages with `[[wikilinks]]`.
 3. Append `## [YYYY-MM-DD] capture | <subject>` to `.wiki/log.md`.
-4. If a synthesized page was created or an entity/concept was added, run `pwsh -File scripts/llm-wiki.ps1 reindex`. If only an existing page was edited in place, skip the reindex.
+4. If a synthesized page was created or an entity/concept was added, run the maintenance CLI's `reindex` (see the Ingest section for the invocation form). If only an existing page was edited in place, skip the reindex.
 
 Keep it light. One small raw file plus one wiki-page touch is the typical capture. If a raw note is growing long, the signal probably belongs in the synthesized page instead.
 
@@ -139,7 +139,7 @@ Long sessions get compacted (summarized). Compaction keeps *what was done* and d
    `- [YYYY-MM-DD] <one-line pointer to the insight and where it happened>`
    This is a write-ahead log: the pointer survives outside the context window even if the session is compacted before the full page is written. Full page creation happens at the next natural pause.
 3. **A bloated context is the stocktake signal.** Context size is a proxy for accumulated session knowledge. When compaction is near (or has just happened), review `.wiki/inbox/journal.md`, promote entries that qualify into pages, and delete the promoted lines. The journal should trend toward empty.
-4. **Environment-side backstop.** Wire the kit's `hooks/precompact_hook.py` as a PreCompact hook (see the kit README). It injects a preservation instruction for the summarizer and the post-compaction model. It is a safety net, not a substitute for rules 1-3.
+4. **Environment-side backstop.** Wire the kit's `hooks/precompact_hook.py` (PreCompact) and `hooks/wiki_index_hook.py` (SessionStart) — see the kit README. The former appends a durable boundary marker to `inbox/journal.md` just before compaction; the latter injects a recovery instruction when the session resumes with `source: "compact"`. Both are safety nets, not substitutes for rules 1-3.
 
 ### Wiki vs. memory boundary
 
