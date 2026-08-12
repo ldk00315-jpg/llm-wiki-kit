@@ -57,8 +57,9 @@ def read_stdin_event() -> dict:
     try:
         if sys.stdin.isatty():
             return {}
-        raw = sys.stdin.read()
-        return json.loads(raw) if raw.strip() else {}
+        # PowerShell 5.1 のパイプはBOM(U+FEFF)を先頭に付けることがある
+        raw = sys.stdin.read().lstrip("﻿").strip()
+        return json.loads(raw) if raw else {}
     except Exception:
         return {}
 
@@ -83,16 +84,15 @@ def main():
         return
     event = read_stdin_event()
     trigger = event.get("trigger", "unknown")
-    transcript = event.get("transcript_path", "")
 
     stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    # 注: transcript_path はjournalへ書かない。絶対パスはOSユーザー名や
+    # セッション識別子を含み、.wiki を共有・同期した際の漏えい面になる
     marker = (
         f"- [{stamp}] **PreCompact境界（{trigger}）** — この行より上の未処理エントリと、"
         f"直前セッションの未記録wiki級知見を、コンパクション後の最初のターンで"
         f"ページ化すること。"
     )
-    if transcript:
-        marker += f" transcript: {transcript}"
 
     journal = root / "inbox" / "journal.md"
     journal.parent.mkdir(exist_ok=True)

@@ -55,8 +55,9 @@ def read_stdin_event() -> dict:
     try:
         if sys.stdin.isatty():
             return {}
-        raw = sys.stdin.read()
-        return json.loads(raw) if raw.strip() else {}
+        # PowerShell 5.1 のパイプはBOM(U+FEFF)を先頭に付けることがある
+        raw = sys.stdin.read().lstrip("﻿").strip()
+        return json.loads(raw) if raw else {}
     except Exception:
         return {}
 
@@ -75,6 +76,24 @@ def log_failure(root: Path | None, message: str) -> None:
         pass
 
 
+import re
+
+
+def _decode_scalar(value: str) -> str:
+    """CLIの ConvertTo-YamlScalar と対称のデコード（依存ゼロ）。"""
+    v = value.strip()
+    if len(v) >= 2 and v.startswith('"') and v.endswith('"'):
+        inner = v[1:-1]
+        return re.sub(
+            r"\\(.)",
+            lambda m: {"n": "\n", "t": "\t"}.get(m.group(1), m.group(1)),
+            inner,
+        )
+    if len(v) >= 2 and v.startswith("'") and v.endswith("'"):
+        return v[1:-1].replace("''", "'")
+    return v
+
+
 def frontmatter(path):
     """先頭のYAMLフロントマターから title / summary を素朴に拾う（依存ゼロ）。"""
     title = summary = ""
@@ -88,9 +107,9 @@ def frontmatter(path):
         if line.strip() == "---":
             break
         if line.startswith("title:"):
-            title = line[len("title:"):].strip().strip("'\"")
+            title = _decode_scalar(line[len("title:"):])
         elif line.startswith("summary:"):
-            summary = line[len("summary:"):].strip().strip("'\"")
+            summary = _decode_scalar(line[len("summary:"):])
     return title, summary
 
 
@@ -124,7 +143,8 @@ def main():
             if page.name.startswith("_"):
                 continue
             title, summary = frontmatter(page)
-            title = title or page.stem
+            title = (title or page.stem).replace("\n", " ").replace("\t", " ")
+            summary = summary.replace("\n", " ").replace("\t", " ")
             if len(summary) > MAX_SUMMARY:
                 summary = summary[:MAX_SUMMARY] + "…"
             rel = page.relative_to(root.parent)

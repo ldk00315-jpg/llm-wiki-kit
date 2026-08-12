@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  smoke-windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Smoke tests (Windows PowerShell 5.1)
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\smoke.ps1
+      - name: Smoke tests (PowerShell 7)
+        shell: pwsh
+        run: pwsh -File tests/smoke.ps1
+
+  hooks-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Hook tests (bash)
+        run: |
+          set -e
+          work=$(mktemp -d)
+          cp -r template/.wiki "$work/.wiki"
+          cd "$work"
+          echo '{"trigger":"auto","transcript_path":"/home/alice/secret.jsonl"}' \
+            | python "$GITHUB_WORKSPACE/hooks/precompact_hook.py"
+          grep -q "PreCompact境界（auto）" .wiki/inbox/journal.md
+          ! grep -q "secret" .wiki/inbox/journal.md
+          out=$(echo '{"source":"compact"}' | python "$GITHUB_WORKSPACE/hooks/wiki_index_hook.py")
+          echo "$out" | grep -q "コンパクション直後の回復指示"
+          out2=$(python "$GITHUB_WORKSPACE/hooks/wiki_index_hook.py" < /dev/null)
+          echo "$out2" | grep -q "LLM Wiki索引"
+          echo "hooks-linux: all assertions passed"

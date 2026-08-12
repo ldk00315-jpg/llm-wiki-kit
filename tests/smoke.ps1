@@ -85,6 +85,61 @@ try {
     & $cli -Command ingest -WikiRoot $root -Text "body" -Title "has [brackets] inside" | Out-Null
     $indexContent = Get-Content (Join-Path $root "raw\_index.md") -Raw -Encoding UTF8
     Assert ($indexContent -match "\\\[brackets\\\]") "brackets escaped in index link label"
+
+    # --- T10: 引用符タイトルの ingest→reindex 往復で索引リンクが壊れない (R-02) ---
+    # T4のタイトル "quote `"here`" and more" は既にingest済み。reindex後の索引を検証
+    & $cli -Command reindex -WikiRoot $root | Out-Null
+    $indexContent = Get-Content (Join-Path $root "raw\_index.md") -Raw -Encoding UTF8
+    Assert ($indexContent -match '\[quote "here" and more\]\(') "quoted title round-trips to clean index label"
+    Assert ($indexContent -notmatch '\\"here\\"') "no leaked YAML escapes in index"
+
+    # --- T11: lint が閉じていない frontmatter を検出する (R-04) ---
+    $unterm = Join-Path $root "raw\2026-01-02-unterminated.md"
+    Set-Content -Path $unterm -Value @("---", 'title: "Missing closing"', "", "body without closing delimiter") -Encoding UTF8
+    $lintOut3 = & $cli -Command lint -WikiRoot $root 2>&1
+    $global:LASTEXITCODE = 0
+    Assert (($lintOut3 -join "`n") -match "Unterminated frontmatter") "lint detects unterminated frontmatter"
+    Remove-Item $unterm -Force
+
+    # --- T12: lint が不正エスケープを検出する (R-04) ---
+    $badesc = Join-Path $root "raw\2026-01-03-badescape.md"
+    Set-Content -Path $badesc -Value @("---", 'title: "invalid\q escape"', "---", "", "body") -Encoding UTF8
+    $lintOut4 = & $cli -Command lint -WikiRoot $root 2>&1
+    $global:LASTEXITCODE = 0
+    Assert (($lintOut4 -join "`n") -match "Invalid escape") "lint detects invalid escape in quoted title"
+    Remove-Item $badesc -Force
+
+    # --- T13: 制御文字入りタイトルがYAMLに漏れない (R-04) ---
+    & $cli -Command ingest -WikiRoot $root -Text "body" -Title "bell$([char]7)title" | Out-Null
+    $bellRaw = Get-ChildItem (Join-Path $root "raw\*.md") | Where-Object { $_.Name -like "*bell*" } | Select-Object -First 1
+    $bellContent = Get-Content $bellRaw.FullName -Raw -Encoding UTF8
+    Assert (-not ($bellContent.Contains([string][char]7))) "C0 control char stripped from YAML"
+
+    # --- T14-16: Pythonフック（python が無い環境ではスキップ） ---
+    $py = Get-Command python -ErrorAction SilentlyContinue
+    if ($py) {
+        $hookDir = Join-Path $repo "hooks"
+        # PS 5.1は外部プロセスのstdoutを既定でCP932デコードする → UTF-8に切替
+        $prevEnc = [Console]::OutputEncoding
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+        # journal が無い状態から PreCompact マーカー追記
+        $event = '{"trigger":"auto","transcript_path":"C:\\Users\\secret\\session.jsonl"}'
+        $prevCwd = Get-Location
+        Set-Location $work
+        try {
+            $event | & $py.Source (Join-Path $hookDir "precompact_hook.py") | Out-Null
+            $journal = Get-Content (Join-Path $root "inbox\journal.md") -Raw -Encoding UTF8
+            Assert ($journal -match "PreCompact境界（auto）") "precompact hook appends boundary marker"
+            Assert ($journal -notmatch "secret") "transcript path NOT persisted to journal (R-06)"
+            $recov = '{"source":"compact"}' | & $py.Source (Join-Path $hookDir "wiki_index_hook.py")
+            Assert (($recov -join "`n") -match "コンパクション直後の回復指示") "index hook injects compact recovery"
+        } finally {
+            Set-Location $prevCwd
+            [Console]::OutputEncoding = $prevEnc
+        }
+    } else {
+        Write-Output "SKIP: python not found - hook tests skipped"
+    }
 }
 finally {
     if (Test-Path $work) { Remove-Item -Recurse -Force $work }
