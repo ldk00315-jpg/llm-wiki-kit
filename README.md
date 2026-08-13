@@ -42,18 +42,28 @@ Andrej Karpathy が提唱した LLM Wiki のアイデア（raw は不変・synth
 
 ### 1. Wikiの雛形とCLIを配置
 
-`template/.wiki/` と `scripts/` をワークスペースへコピーして初期化:
+`template/.wiki/`・`scripts/`・`core/llmwiki.py` をワークスペースへコピーして初期化:
 
 ```powershell
 Copy-Item -Recurse template\.wiki <あなたのワークスペース>\.wiki
 Copy-Item -Recurse scripts <あなたのワークスペース>\scripts
+Copy-Item core\llmwiki.py <あなたのワークスペース>\scripts\llmwiki.py
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File <あなたのワークスペース>\scripts\llm-wiki.ps1 init -WikiRoot <あなたのワークスペース>\.wiki
 ```
 
-（`scripts/` のコピーは必須です。スラッシュコマンドが導入先の
-`scripts/llm-wiki.ps1` を参照するため、コピーしないと `/wiki-ingest` 等が
-動きません。コピーしない場合はコマンド内のパスをキットのclone先に読み替えて
-ください）
+**v2系からCLIの正本はPython**（`core/llmwiki.py`・依存ゼロ）です。
+`llm-wiki.ps1` は従来の呼び出し形を維持する互換wrapperで、同じディレクトリの
+`llmwiki.py`（無ければキット内 `../core/llmwiki.py`）へ委譲します。
+Pythonから直接呼ぶ場合:
+
+```powershell
+python <あなたのワークスペース>\scripts\llmwiki.py lint --wiki-root <あなたのワークスペース>\.wiki
+```
+
+書き込みコマンド（init / ingest / reindex）はVault単位の協調lock
+（`.wiki/.lock/`）で直列化され、すべての書き込みはatomic
+（一時ファイル→置換）です。外部編集と衝突した場合は上書きせず
+`*.conflict-<時刻>` ファイルを生成します。
 
 ### 2. フックを配線
 
@@ -174,11 +184,14 @@ Wikiの実体はただのMarkdownフォルダなので、[Obsidian](https://obsi
 ## 構成
 
 ```
+core/llmwiki.py              メンテCLIの正本（Python・lock/atomic write/F-06内蔵）
+scripts/llm-wiki.ps1         互換wrapper（従来の呼び出し形→Python coreへ委譲）
 hooks/wiki_index_hook.py     呼び出しインデックス＋compact回復注入（SessionStartフック）
 hooks/precompact_hook.py     境界マーカーのディスク永続化（PreCompactフック）
-scripts/llm-wiki.ps1         メンテCLI: init / status / ingest / reindex / lint
 commands/wiki-*.md           Claude Code スラッシュコマンド6本
-tests/smoke.ps1              回帰テスト14項目
+tests/smoke.ps1              挙動パリティ回帰（28 assertion・wrapper経由でcoreを検証）
+tests/test_core.py           coreユニットテスト（lock/atomic/F-06/往復）
+docs/cross-agent-design.md   クロスエージェント設計書（Claude×Codex合意済み）
 template/.wiki/              Wikiの雛形（スキーマ＋WALジャーナル＋サンプルページ＋raw実体入り）
 template/.wiki/.obsidian/    Obsidian用の設定済みVault構成（任意・無くても動く）
 ```
