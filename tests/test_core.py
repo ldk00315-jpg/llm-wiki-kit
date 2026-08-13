@@ -152,78 +152,54 @@ class TestVaultLock(TempVaultCase):
         lock = llmwiki.VaultLock(self.root, timeout=1).acquire()
         lock.release()
 
-    def test_stale_recovery(self):
-        stale = llmwiki.VaultLock(self.root, timeout=1)
-        stale.acquire()
-        # lockディレクトリを古く見せる
+    def test_orphan_lock_not_auto_reclaimed(self):
+        """再検証§4案A: 孤児lockは通常acquireから自動回収されない（fail-closed）。"""
+        orphan = llmwiki.VaultLock(self.root, timeout=1)
+        orphan.acquire()
         old = time.time() - 3600
-        os.utime(stale.lock_dir, (old, old))
-        fresh = llmwiki.VaultLock(self.root, timeout=2, stale_sec=300)
-        fresh.acquire()  # stale回収して取得できるはず
+        os.utime(orphan.lock_dir, (old, old))  # 1時間前の死骸に見せる
+        with self.assertRaises(llmwiki.LockTimeout) as ctx:
+            llmwiki.VaultLock(self.root, timeout=0.7).acquire()
+        # 失敗メッセージがowner情報とunlock手順を案内する
+        self.assertIn("unlock", str(ctx.exception))
+        self.assertIn("lock age", str(ctx.exception))
+        # lockは無傷のまま
+        self.assertTrue(orphan.lock_dir.is_dir())
+        self.assertEqual(orphan._owner_token(), orphan.token)
+
+    def test_explicit_unlock_flow(self):
+        """再検証§5-5: force無しは解除しない。force有りで解除→新規取得できる。"""
+        orphan = llmwiki.VaultLock(self.root, timeout=1)
+        orphan.acquire()
+        unlocked, msg = llmwiki.force_unlock(self.root, force=False)
+        self.assertFalse(unlocked)
+        self.assertIn("--force", msg)
+        self.assertTrue(orphan.lock_dir.is_dir())  # まだ存在
+        unlocked, msg = llmwiki.force_unlock(self.root, force=True)
+        self.assertTrue(unlocked)
+        self.assertFalse(orphan.lock_dir.exists())
+        fresh = llmwiki.VaultLock(self.root, timeout=1).acquire()
         fresh.release()
 
-    def test_stale_takeover_release_safety(self):
-        """検証§3.1: stale回収後、旧所有者のreleaseが新所有者のlockを壊さない。"""
+    def test_old_owner_cannot_touch_new_lock_after_unlock(self):
+        """再検証§5-1/§5-3: 明示unlock後の旧所有者のrelease/refreshが
+        新所有者のlockを壊さない・leaseを更新しない。"""
         a = llmwiki.VaultLock(self.root, timeout=1)
         a.acquire()
-        old = time.time() - 3600
-        os.utime(a.lock_dir, (old, old))
-        b = llmwiki.VaultLock(self.root, timeout=2, stale_sec=300)
-        b.acquire()  # staleとしてAのlockを回収し、自分のlockを取得
-        a.release()  # 遅れて戻った旧所有者A
-        # Bのlockは無傷でなければならない
+        llmwiki.force_unlock(self.root, force=True)  # 管理操作でAのlockを解除
+        b = llmwiki.VaultLock(self.root, timeout=1)
+        b.acquire()
+        b_mtime = b.lock_dir.stat().st_mtime_ns
+        time.sleep(0.02)
+        a.refresh()  # 旧所有者のheartbeat → Bのleaseを触ってはならない
+        self.assertEqual(b.lock_dir.stat().st_mtime_ns, b_mtime)
+        a.release()  # 旧所有者のrelease → Bのlockを壊してはならない
         self.assertTrue(b.lock_dir.is_dir())
         self.assertEqual(b._owner_token(), b.token)
-        # 第三者Cは取得できない（Bが保持中）
         with self.assertRaises(llmwiki.LockTimeout):
             llmwiki.VaultLock(self.root, timeout=0.5).acquire()
         b.release()
         self.assertFalse(b.lock_dir.exists())
-
-    def test_heartbeat_prevents_steal(self):
-        """検証§3.1: refresh()中のwriterはstale_sec超過でも奪取されない。"""
-        a = llmwiki.VaultLock(self.root, timeout=1, stale_sec=1.0)
-        a.acquire()
-        time.sleep(1.2)
-        a.refresh()  # heartbeat
-        with self.assertRaises(llmwiki.LockTimeout):
-            llmwiki.VaultLock(self.root, timeout=0.5, stale_sec=1.0).acquire()
-        a.release()
-
-    def test_concurrent_stale_reclaim_single_holder(self):
-        """検証§3.1: stale回収を複数writerが同時に試みても保持者は常に1人。"""
-        # 孤児lock（異常終了の死骸）を用意
-        orphan = llmwiki.VaultLock(self.root, timeout=1)
-        orphan.acquire()
-        old = time.time() - 3600
-        os.utime(orphan.lock_dir, (old, old))
-
-        holders = []
-        holders_lock = threading.Lock()
-        max_concurrent = [0]
-        errors = []
-
-        def worker():
-            try:
-                lk = llmwiki.VaultLock(self.root, timeout=10, stale_sec=300)
-                lk.acquire()
-                with holders_lock:
-                    holders.append(1)
-                    max_concurrent[0] = max(max_concurrent[0], len(holders))
-                time.sleep(0.05)
-                with holders_lock:
-                    holders.pop()
-                lk.release()
-            except Exception as e:  # noqa: BLE001
-                errors.append(e)
-
-        threads = [threading.Thread(target=worker) for _ in range(4)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        self.assertEqual(errors, [])
-        self.assertEqual(max_concurrent[0], 1)  # 同時保持は常に1人
 
     def test_serialized_ingest(self):
         errors = []

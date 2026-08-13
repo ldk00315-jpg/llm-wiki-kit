@@ -64,7 +64,18 @@ python <あなたのワークスペース>\scripts\llmwiki.py lint --wiki-root <
 書き込みコマンド（init / ingest / reindex）はVault単位の協調lock
 （`.wiki/.lock/`）で直列化され、すべての書き込みはatomic
 （一時ファイル→置換）です。外部編集と衝突した場合は上書きせず
-`*.conflict-<時刻>` ファイルを生成します。
+`*.conflict-<時刻>-<id>` ファイルを生成します。
+
+lockは**fail-closed設計**です: 他のwriterのlockを自動で奪いません。
+プロセス異常終了でlockが残った場合は、owner情報を確認の上で明示的に
+解除してください:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\llm-wiki.ps1 unlock -WikiRoot <ワークスペース>\.wiki
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\llm-wiki.ps1 unlock -WikiRoot <ワークスペース>\.wiki -Force
+```
+
+（1回目はowner情報の表示のみ・`-Force` 付きで実際に解除）
 
 ### 2. フックを配線
 

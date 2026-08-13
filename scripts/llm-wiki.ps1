@@ -1,13 +1,14 @@
 ﻿[CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("init", "status", "ingest", "reindex", "lint")]
+    [ValidateSet("init", "status", "ingest", "reindex", "lint", "unlock")]
     [string]$Command = "status",
 
     [string]$WikiRoot = ".wiki",
     [string]$Source,
     [string]$Text,
-    [string]$Title
+    [string]$Title,
+    [switch]$Force
 )
 
 # llm-wiki.ps1 — 互換wrapper（v2系）
@@ -56,6 +57,7 @@ if (-not $corePath) {
 # 値はコマンドラインでなく環境変数で渡す。PS 5.1のネイティブ引数渡しは
 # 埋め込み引用符を正しくエスケープしない（quoting地獄の構造的回避）
 $argv = @($pyLauncherArgs) + @($corePath, $Command)
+if ($Force) { $argv += "--force" }
 $env:LLMWIKI_WIKI_ROOT = $WikiRoot
 if ($Source) { $env:LLMWIKI_SOURCE = $Source } else { Remove-Item Env:LLMWIKI_SOURCE -ErrorAction SilentlyContinue }
 if ($Text)   { $env:LLMWIKI_TEXT = $Text }     else { Remove-Item Env:LLMWIKI_TEXT -ErrorAction SilentlyContinue }

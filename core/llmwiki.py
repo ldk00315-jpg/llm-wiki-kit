@@ -183,23 +183,25 @@ class LockTimeout(RuntimeError):
 class VaultLock:
     """Vault単位の協調lock。lock directoryのatomic creationを利用（決定#9）。
 
-    排他契約（Phase 1検証 §3.1 対応）:
+    排他契約（Phase 1再検証 §3〜§4 推奨案A採用 = fail-closed設計）:
     - `<root>/.lock/` のmkdirが成功した者が所有。取得ごとに固有の owner token
       （UUID）を発行し owner.json に記録する
-    - `release()` は owner.json のtokenが自分のものである場合だけ削除する
-      —— stale回収後に遅れて戻った旧所有者が、新所有者のlockを壊せない
-    - stale回収は「quarantine rename → 削除」: `.lock/` を一意名へatomic renameし、
-      renameに成功した1者だけが解体を行う（複数writerの同時回収競合を排除）
-    - `refresh()` はlease heartbeat: 長い処理はこれでmtimeを更新し、正当な
-      長時間処理がstale扱いで奪取されるのを防ぐ（lock保持中の処理は
-      stale_sec より十分短いか、定期的に refresh() を呼ぶこと）
+    - **自動stale回収は行わない。** 待機者は既存lockを削除・renameせず、
+      timeout時にowner情報とlock ageを添えて失敗する。これにより
+      「所有権check→delete/renameの間に別writerが割り込む」TOCTOU競合の
+      対象操作そのものが通常経路から消える（可用性よりデータ保全を優先）
+    - 孤児lock（異常終了の死骸）の解除は明示的な管理操作 `unlock`（CLI・
+      `--force` 必須・owner情報表示）だけが行う
+    - `release()` / `refresh()` は owner.json のtokenが自分のものである場合
+      だけ操作する —— 明示unlock後に遅れて戻った旧所有者が、新所有者の
+      lockを壊したりleaseを触ったりしない（防御の第二層）
     - 外部エディタ（Obsidian等）はこのlockを守らない＝atomic write側が防衛線
     """
 
     def __init__(self, root: Path, timeout: float = 10.0, stale_sec: float = 300.0):
         self.lock_dir = Path(root) / ".lock"
         self.timeout = timeout
-        self.stale_sec = stale_sec
+        self.stale_sec = stale_sec  # 表示用（自動回収には使わない）
         self.token = uuid.uuid4().hex
         self._acquired = False
 
@@ -216,21 +218,11 @@ class VaultLock:
         except (OSError, ValueError):
             return None
 
-    def _is_stale(self) -> bool:
+    def _age_sec(self) -> float | None:
         try:
-            age = time.time() - self.lock_dir.stat().st_mtime
-            return age > self.stale_sec
+            return time.time() - self.lock_dir.stat().st_mtime
         except OSError:
-            return False  # 消えた直後 → 通常の再試行に任せる
-
-    def _reclaim_stale(self) -> None:
-        """stale lockの回収。atomic renameに成功した1者だけが解体する。"""
-        quarantine = self.lock_dir.with_name(f".lock-stale-{uuid.uuid4().hex[:8]}")
-        try:
-            os.rename(self.lock_dir, quarantine)
-        except OSError:
-            return  # 別のwriterが先に回収した（または所有者が動いた）
-        shutil.rmtree(quarantine, ignore_errors=True)
+            return None
 
     def acquire(self):
         deadline = time.monotonic() + self.timeout
@@ -250,29 +242,33 @@ class VaultLock:
                 self._acquired = True
                 return self
             except FileExistsError:
-                if self._is_stale():
-                    self._reclaim_stale()
-                    continue
                 if time.monotonic() >= deadline:
+                    age = self._age_sec()
+                    age_note = f" (lock age: {age:.0f}s)" if age is not None else ""
                     raise LockTimeout(
-                        f"Vault lock held by another writer: {self.lock_dir} "
-                        f"owner={self._owner_info()}"
+                        f"Vault lock held by another writer: {self.lock_dir}{age_note} "
+                        f"owner={self._owner_info()} "
+                        f"— if this is an orphan lock from a crashed process, "
+                        f"run: llmwiki unlock --wiki-root <root> --force"
                     )
                 time.sleep(0.2)
 
     def refresh(self):
-        """lease heartbeat: 保持中のlockのmtimeを更新しstale奪取を防ぐ。"""
-        if self._acquired:
-            try:
-                os.utime(self.lock_dir)
-            except OSError:
-                pass
+        """保持中lockのmtime更新（lock ageの表示精度向上用）。所有権を検証する。"""
+        if not self._acquired:
+            return
+        if self._owner_token() != self.token:
+            return  # 明示unlockで奪取された後: 新所有者のlockに触らない
+        try:
+            os.utime(self.lock_dir)
+        except OSError:
+            pass
 
     def release(self):
         if not self._acquired:
             return
         self._acquired = False
-        # 所有権の検証: stale回収で奪取された後なら、他人のlockには触らない
+        # 所有権の検証: 明示unlock後に別writerが取得していたら、触らない
         if self._owner_token() != self.token:
             return
         try:
@@ -280,6 +276,43 @@ class VaultLock:
             self.lock_dir.rmdir()
         except OSError:
             pass
+
+    def __enter__(self):
+        return self.acquire()
+
+    def __exit__(self, *exc):
+        self.release()
+
+
+def force_unlock(root: Path, force: bool = False) -> tuple[bool, str]:
+    """孤児lockの明示解除（管理操作）。
+
+    force=False では解除せず owner情報とageを返す（確認用）。
+    force=True で quarantine rename → 削除を行う。
+    戻り値: (解除したか, 表示メッセージ)
+    """
+    lock_dir = Path(root) / ".lock"
+    if not lock_dir.exists():
+        return (False, "No lock present.")
+    try:
+        owner = (lock_dir / "owner.json").read_text(encoding="utf-8")
+    except OSError:
+        owner = "(unknown owner)"
+    try:
+        age = time.time() - lock_dir.stat().st_mtime
+        age_note = f"{age:.0f}s"
+    except OSError:
+        age_note = "unknown"
+    info = f"Lock owner: {owner} / lock age: {age_note}"
+    if not force:
+        return (False, f"{info}\nNot unlocked. Re-run with --force to remove this lock.")
+    quarantine = lock_dir.with_name(f".lock-removed-{uuid.uuid4().hex[:8]}")
+    try:
+        os.rename(lock_dir, quarantine)
+    except OSError as e:
+        return (False, f"{info}\nUnlock failed (lock changed or in use): {e}")
+    shutil.rmtree(quarantine, ignore_errors=True)
+    return (True, f"{info}\nUnlocked.")
 
     def __enter__(self):
         return self.acquire()
@@ -688,11 +721,12 @@ def lint(root: Path) -> tuple[list[str], list[str]]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="llmwiki", description="LLM Wiki maintenance core")
-    parser.add_argument("command", choices=["init", "status", "ingest", "reindex", "lint"])
+    parser.add_argument("command", choices=["init", "status", "ingest", "reindex", "lint", "unlock"])
     parser.add_argument("--wiki-root", default=".wiki")
     parser.add_argument("--source", default=None)
     parser.add_argument("--text", default=None)
     parser.add_argument("--title", default=None)
+    parser.add_argument("--force", action="store_true")
     args = parser.parse_args(argv)
 
     # PowerShell wrapper は値を環境変数で渡す（PS 5.1の引用符エスケープ問題の回避）。
@@ -728,6 +762,10 @@ def main(argv: list[str] | None = None) -> int:
                 add_log_entry(root, "reindex", "workspace",
                               "Rebuilt master, raw, and wiki indexes.", locked=True)
             print("Rebuilt indexes.")
+        elif args.command == "unlock":
+            unlocked, message = force_unlock(root, force=args.force)
+            print(message)
+            return 0 if unlocked else 1
         elif args.command == "lint":
             assert_wiki_exists(root)
             issues, warnings = lint(root)
