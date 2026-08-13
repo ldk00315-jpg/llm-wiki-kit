@@ -51,7 +51,8 @@ Copy-Item core\llmwiki.py <あなたのワークスペース>\scripts\llmwiki.py
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File <あなたのワークスペース>\scripts\llm-wiki.ps1 init -WikiRoot <あなたのワークスペース>\.wiki
 ```
 
-**v2系からCLIの正本はPython**（`core/llmwiki.py`・依存ゼロ）です。
+**v1.3系からCLIの正本はPython**（`core/llmwiki.py`・依存ゼロ）です
+（旧配置の削除を検討するのは将来のv2。それまでは互換wrapperを維持します）。
 `llm-wiki.ps1` は従来の呼び出し形を維持する互換wrapperで、同じディレクトリの
 `llmwiki.py`（無ければキット内 `../core/llmwiki.py`）へ委譲します。
 Pythonから直接呼ぶ場合:

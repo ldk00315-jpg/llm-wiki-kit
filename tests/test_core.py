@@ -101,6 +101,47 @@ class TestAtomicWrite(TempVaultCase):
         leftovers = list((self.root / "wiki" / "concepts").glob(".tmp-*"))
         self.assertEqual(leftovers, [])
 
+    def test_same_size_mtime_preserved_edit_detected(self):
+        """検証§3.2: 同サイズ・mtime復元の外部編集をcontent hashで検出する。"""
+        target = self.root / "wiki" / "concepts" / "H.md"
+        llmwiki.atomic_write_text(target, "AAAA")
+        snap = llmwiki._snapshot(target)
+        st = target.stat()
+        # 同じサイズで中身だけ変え、mtimeを復元（mtime/sizeでは見えない編集）
+        target.write_bytes(b"BBBB")
+        os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns))
+        self.assertEqual(llmwiki._snapshot(target)[:2], snap[:2])  # mtime/sizeは同一
+        conflict = llmwiki.atomic_write_text(target, "new content", expect_snapshot=snap)
+        self.assertIsNotNone(conflict)  # hashが差を検出
+        self.assertEqual(target.read_text(encoding="utf-8"), "BBBB")  # 原本保護
+        conflict.unlink()
+
+    def test_toctou_creation_detected(self):
+        """検証§3.2: 「存在しないはず」の場所に外部作成があればconflictへ退避。"""
+        target = self.root / "raw" / "2026-01-05-race.md"
+        self.assertFalse(target.exists())
+        target.write_text("external created first", encoding="utf-8")
+        conflict = llmwiki.atomic_write_text(target, "ours", expect_snapshot=None)
+        self.assertIsNotNone(conflict)
+        self.assertIn("external created first", target.read_text(encoding="utf-8"))
+        conflict.unlink()
+
+    def test_index_read_modify_write_protected(self):
+        """検証§3.2: reindexが外部編集されたindexを黙って上書きしない。"""
+        idx = self.root / "raw" / "_index.md"
+        snap = llmwiki._snapshot(idx)
+        st = idx.stat()
+        original = idx.read_bytes()
+        # 同サイズ改変+mtime復元（最も検出しにくい形）
+        mutated = original.replace(b"Raw Sources", b"Raw Source5", 1)
+        self.assertEqual(len(mutated), len(original))
+        idx.write_bytes(mutated)
+        os.utime(idx, ns=(st.st_atime_ns, st.st_mtime_ns))
+        conflict = llmwiki.atomic_write_text(idx, "regenerated", expect_snapshot=snap)
+        self.assertIsNotNone(conflict)
+        self.assertIn(b"Raw Source5", idx.read_bytes())  # 外部編集が守られる
+        conflict.unlink()
+
 
 class TestVaultLock(TempVaultCase):
     def test_exclusive(self):
@@ -120,6 +161,69 @@ class TestVaultLock(TempVaultCase):
         fresh = llmwiki.VaultLock(self.root, timeout=2, stale_sec=300)
         fresh.acquire()  # stale回収して取得できるはず
         fresh.release()
+
+    def test_stale_takeover_release_safety(self):
+        """検証§3.1: stale回収後、旧所有者のreleaseが新所有者のlockを壊さない。"""
+        a = llmwiki.VaultLock(self.root, timeout=1)
+        a.acquire()
+        old = time.time() - 3600
+        os.utime(a.lock_dir, (old, old))
+        b = llmwiki.VaultLock(self.root, timeout=2, stale_sec=300)
+        b.acquire()  # staleとしてAのlockを回収し、自分のlockを取得
+        a.release()  # 遅れて戻った旧所有者A
+        # Bのlockは無傷でなければならない
+        self.assertTrue(b.lock_dir.is_dir())
+        self.assertEqual(b._owner_token(), b.token)
+        # 第三者Cは取得できない（Bが保持中）
+        with self.assertRaises(llmwiki.LockTimeout):
+            llmwiki.VaultLock(self.root, timeout=0.5).acquire()
+        b.release()
+        self.assertFalse(b.lock_dir.exists())
+
+    def test_heartbeat_prevents_steal(self):
+        """検証§3.1: refresh()中のwriterはstale_sec超過でも奪取されない。"""
+        a = llmwiki.VaultLock(self.root, timeout=1, stale_sec=1.0)
+        a.acquire()
+        time.sleep(1.2)
+        a.refresh()  # heartbeat
+        with self.assertRaises(llmwiki.LockTimeout):
+            llmwiki.VaultLock(self.root, timeout=0.5, stale_sec=1.0).acquire()
+        a.release()
+
+    def test_concurrent_stale_reclaim_single_holder(self):
+        """検証§3.1: stale回収を複数writerが同時に試みても保持者は常に1人。"""
+        # 孤児lock（異常終了の死骸）を用意
+        orphan = llmwiki.VaultLock(self.root, timeout=1)
+        orphan.acquire()
+        old = time.time() - 3600
+        os.utime(orphan.lock_dir, (old, old))
+
+        holders = []
+        holders_lock = threading.Lock()
+        max_concurrent = [0]
+        errors = []
+
+        def worker():
+            try:
+                lk = llmwiki.VaultLock(self.root, timeout=10, stale_sec=300)
+                lk.acquire()
+                with holders_lock:
+                    holders.append(1)
+                    max_concurrent[0] = max(max_concurrent[0], len(holders))
+                time.sleep(0.05)
+                with holders_lock:
+                    holders.pop()
+                lk.release()
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(max_concurrent[0], 1)  # 同時保持は常に1人
 
     def test_serialized_ingest(self):
         errors = []

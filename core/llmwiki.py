@@ -19,13 +19,15 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import time
 import urllib.request
+import uuid
 from pathlib import Path
 
-VERSION = "2.0.0-dev"
+VERSION = "1.3.0-dev"
 
 SECTIONS = [
     ("Sources", "sources"),
@@ -125,10 +127,15 @@ def injection_warnings(text: str) -> list[str]:
 
 
 def _snapshot(path: Path):
-    """変更検知用スナップショット（mtime_ns + サイズ）。無ければNone。"""
+    """変更検知用スナップショット（mtime_ns + サイズ + SHA-256）。無ければNone。
+
+    content hashを持つため「同じサイズへ編集しmtimeを復元した外部変更」も検出する
+    （設計書 決定#9。mtime/sizeだけの判定はPhase 1検証 §3.2 で棄却された）。
+    """
     try:
+        data = path.read_bytes()
         st = path.stat()
-        return (st.st_mtime_ns, st.st_size)
+        return (st.st_mtime_ns, len(data), hashlib.sha256(data).hexdigest())
     except FileNotFoundError:
         return None
 
@@ -149,10 +156,14 @@ def atomic_write_text(path: Path, text: str, expect_snapshot=..., conflict_ok: b
             f.flush()
             os.fsync(f.fileno())
         if expect_snapshot is not ... and _snapshot(path) != expect_snapshot:
+            # expect_snapshot=None は「存在しないはず」の意味も持つ:
+            # check後に外部で同名ファイルが作られたTOCTOU競合もここで検出される
             if not conflict_ok:
                 raise RuntimeError(f"Concurrent modification detected: {path}")
             stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-            conflict = path.with_name(path.name + f".conflict-{stamp}")
+            conflict = path.with_name(
+                path.name + f".conflict-{stamp}-{uuid.uuid4().hex[:8]}"
+            )
             os.replace(tmp, conflict)
             return conflict
         os.replace(tmp, path)
@@ -172,9 +183,16 @@ class LockTimeout(RuntimeError):
 class VaultLock:
     """Vault単位の協調lock。lock directoryのatomic creationを利用（決定#9）。
 
-    - `<root>/.lock/` のmkdirが成功した者が所有。owner.jsonにpid・host・時刻を記録
-    - 競合時は0.2秒間隔で再試行し、timeout秒で LockTimeout
-    - stale_sec を超えた古いlockは回収する（プロセス異常終了の救済）
+    排他契約（Phase 1検証 §3.1 対応）:
+    - `<root>/.lock/` のmkdirが成功した者が所有。取得ごとに固有の owner token
+      （UUID）を発行し owner.json に記録する
+    - `release()` は owner.json のtokenが自分のものである場合だけ削除する
+      —— stale回収後に遅れて戻った旧所有者が、新所有者のlockを壊せない
+    - stale回収は「quarantine rename → 削除」: `.lock/` を一意名へatomic renameし、
+      renameに成功した1者だけが解体を行う（複数writerの同時回収競合を排除）
+    - `refresh()` はlease heartbeat: 長い処理はこれでmtimeを更新し、正当な
+      長時間処理がstale扱いで奪取されるのを防ぐ（lock保持中の処理は
+      stale_sec より十分短いか、定期的に refresh() を呼ぶこと）
     - 外部エディタ（Obsidian等）はこのlockを守らない＝atomic write側が防衛線
     """
 
@@ -182,6 +200,7 @@ class VaultLock:
         self.lock_dir = Path(root) / ".lock"
         self.timeout = timeout
         self.stale_sec = stale_sec
+        self.token = uuid.uuid4().hex
         self._acquired = False
 
     def _owner_info(self) -> str:
@@ -190,6 +209,13 @@ class VaultLock:
         except OSError:
             return "(unknown owner)"
 
+    def _owner_token(self) -> str | None:
+        try:
+            data = json.loads((self.lock_dir / "owner.json").read_text(encoding="utf-8"))
+            return data.get("token")
+        except (OSError, ValueError):
+            return None
+
     def _is_stale(self) -> bool:
         try:
             age = time.time() - self.lock_dir.stat().st_mtime
@@ -197,12 +223,22 @@ class VaultLock:
         except OSError:
             return False  # 消えた直後 → 通常の再試行に任せる
 
+    def _reclaim_stale(self) -> None:
+        """stale lockの回収。atomic renameに成功した1者だけが解体する。"""
+        quarantine = self.lock_dir.with_name(f".lock-stale-{uuid.uuid4().hex[:8]}")
+        try:
+            os.rename(self.lock_dir, quarantine)
+        except OSError:
+            return  # 別のwriterが先に回収した（または所有者が動いた）
+        shutil.rmtree(quarantine, ignore_errors=True)
+
     def acquire(self):
         deadline = time.monotonic() + self.timeout
         while True:
             try:
                 self.lock_dir.mkdir()
                 owner = {
+                    "token": self.token,
                     "pid": os.getpid(),
                     "host": os.environ.get("COMPUTERNAME") or os.environ.get("HOSTNAME") or "",
                     "started": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -215,12 +251,7 @@ class VaultLock:
                 return self
             except FileExistsError:
                 if self._is_stale():
-                    # stale回収: owner記録を残しつつ解体して再試行
-                    try:
-                        (self.lock_dir / "owner.json").unlink(missing_ok=True)
-                        self.lock_dir.rmdir()
-                    except OSError:
-                        pass
+                    self._reclaim_stale()
                     continue
                 if time.monotonic() >= deadline:
                     raise LockTimeout(
@@ -229,15 +260,26 @@ class VaultLock:
                     )
                 time.sleep(0.2)
 
+    def refresh(self):
+        """lease heartbeat: 保持中のlockのmtimeを更新しstale奪取を防ぐ。"""
+        if self._acquired:
+            try:
+                os.utime(self.lock_dir)
+            except OSError:
+                pass
+
     def release(self):
         if not self._acquired:
+            return
+        self._acquired = False
+        # 所有権の検証: stale回収で奪取された後なら、他人のlockには触らない
+        if self._owner_token() != self.token:
             return
         try:
             (self.lock_dir / "owner.json").unlink(missing_ok=True)
             self.lock_dir.rmdir()
         except OSError:
             pass
-        self._acquired = False
 
     def __enter__(self):
         return self.acquire()
@@ -368,7 +410,10 @@ def init_vault(root: Path):
     with VaultLock(root):
         for path, text in seeds.items():
             if not path.exists():
-                atomic_write_text(path, text)
+                # expect_snapshot=None: check後に外部で作られたらconflictへ退避
+                conflict = atomic_write_text(path, text, expect_snapshot=None)
+                if conflict is not None:
+                    print(f"WARN: {path.name} was created concurrently; seed saved to {conflict.name}")
         update_indexes(root, locked=True)
 
 
@@ -400,9 +445,18 @@ def update_indexes(root: Path, locked: bool = False):
     raw_files = _iter_raw_files(root)
     article_files = _iter_article_files(root)
 
-    raw_created = index_created(raw_dir / "_index.md", today)
-    wiki_created = index_created(wiki_dir / "_index.md", today)
-    master_created = index_created(root / "_index.md", today)
+    # read-modify-write保護: created:を読む前にsnapshotを取り、書き込み時に
+    # 外部変更（Obsidian等・lockを守らない編集者）を検出する（決定#9・検証§3.2）
+    raw_index_path = raw_dir / "_index.md"
+    wiki_index_path = wiki_dir / "_index.md"
+    master_index_path = root / "_index.md"
+    snap_raw = _snapshot(raw_index_path)
+    snap_wiki = _snapshot(wiki_index_path)
+    snap_master = _snapshot(master_index_path)
+
+    raw_created = index_created(raw_index_path, today)
+    wiki_created = index_created(wiki_index_path, today)
+    master_created = index_created(master_index_path, today)
 
     raw_lines = [
         "---", "title: Raw Sources",
@@ -457,9 +511,14 @@ def update_indexes(root: Path, locked: bool = False):
         "- [Operation log](log.md)",
     ]
 
-    atomic_write_text(raw_dir / "_index.md", "\n".join(raw_lines) + "\n")
-    atomic_write_text(wiki_dir / "_index.md", "\n".join(wiki_lines) + "\n")
-    atomic_write_text(root / "_index.md", "\n".join(master_lines) + "\n")
+    for path, lines, snap in [
+        (raw_index_path, raw_lines, snap_raw),
+        (wiki_index_path, wiki_lines, snap_wiki),
+        (master_index_path, master_lines, snap_master),
+    ]:
+        conflict = atomic_write_text(path, "\n".join(lines) + "\n", expect_snapshot=snap)
+        if conflict is not None:
+            print(f"WARN: {path.name} changed concurrently; regenerated index saved to {conflict.name}")
 
 
 def add_log_entry(root: Path, action: str, subject: str, detail: str, locked: bool = False):
@@ -525,7 +584,7 @@ def ingest(root: Path, source: str | None, text: str | None, title: str | None) 
         f"{body}\n"
     )
 
-    with VaultLock(root):
+    with VaultLock(root) as lock:
         ensure_dirs(root)
         slug = new_slug(title)
         target = root / "raw" / f"{today}-{slug}.md"
@@ -533,7 +592,12 @@ def ingest(root: Path, source: str | None, text: str | None, title: str | None) 
         while target.exists():
             target = root / "raw" / f"{today}-{slug}-{i}.md"
             i += 1
-        atomic_write_text(target, content)
+        # expect_snapshot=None: 一意名の選定後に外部で同名が作られたら退避
+        conflict = atomic_write_text(target, content, expect_snapshot=None)
+        if conflict is not None:
+            target = conflict
+            print(f"WARN: raw target was created concurrently; saved as {conflict.name}")
+        lock.refresh()
         update_indexes(root, locked=True)
         add_log_entry(
             root, "ingest", title,
