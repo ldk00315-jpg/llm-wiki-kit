@@ -11,7 +11,7 @@ param(
     [switch]$Force
 )
 
-# llm-wiki.ps1 — 互換wrapper（v2系）
+# llm-wiki.ps1 — 互換wrapper（v1.3系）
 #
 # 設計書 docs/cross-agent-design.md 決定#2 により、CLIの正本は
 # Python core（core/llmwiki.py）へ移行した。本スクリプトは従来の
@@ -36,7 +36,7 @@ if ($cmd) {
     }
 }
 if (-not $pythonExe) {
-    Write-Output "ERROR: Python 3.10+ not found. llm-wiki-kit v2 requires Python (it is already required for the hooks)."
+    Write-Output "ERROR: Python 3.10+ not found. llm-wiki-kit v1.3+ requires Python (it is already required for the hooks)."
     exit 1
 }
 

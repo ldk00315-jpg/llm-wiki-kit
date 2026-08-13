@@ -314,12 +314,6 @@ def force_unlock(root: Path, force: bool = False) -> tuple[bool, str]:
     shutil.rmtree(quarantine, ignore_errors=True)
     return (True, f"{info}\nUnlocked.")
 
-    def __enter__(self):
-        return self.acquire()
-
-    def __exit__(self, *exc):
-        self.release()
-
 
 # ---------------------------------------------------------------------------
 # Vault構造
