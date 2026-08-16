@@ -1,3 +1,9 @@
 __pycache__/
 *.pyc
 .lock/
+
+# リポジトリのルートは Vault ではない（Vaultは配布先の .wiki/）。
+# Obsidianで誤ってこのフォルダを開いたときに生成される設定を無視する。
+# 先頭スラッシュでルート限定にすること —— `.obsidian/` と書くと
+# template/.wiki/.obsidian/（配布する正規のVault設定）まで無視される
+/.obsidian/
