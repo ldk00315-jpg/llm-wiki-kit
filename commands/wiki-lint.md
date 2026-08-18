@@ -19,3 +19,10 @@ Run a semantic quality pass on `.wiki/`. Run `/wiki-health` first; only continue
 A prioritized issue list with file paths and proposed fixes. Ask before applying judgment-heavy fixes (rewriting claims, merging pages). Apply mechanical fixes (broken-link redirects to obvious targets, frontmatter date refreshes) directly and log them.
 
 After applying fixes, append `## [YYYY-MM-DD] lint | workspace` to `.wiki/log.md` with a summary of what changed.
+
+---
+
+> **移行のお知らせ**: このコマンドは `skills/wiki-lint/SKILL.md` へ移行しました。
+> 内容の正本はそちらで、CLIの呼び出しもPython Core（`core/llmwiki.py`）へ
+> 更新されています。このファイルは既存利用者のための互換配置として残しています
+> （削除の検討は将来のv2）。新規に導入する場合は Skills 側を使ってください。

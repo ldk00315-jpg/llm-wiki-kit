@@ -27,3 +27,10 @@ Read `.wiki/schema/AGENTS.llm-wiki.md` first, then ingest `$ARGUMENTS` into the 
 - Use `[[PageName]]` wikilinks for cross-references. Pair with a normal Markdown link when the path differs from the title.
 - Source slugs and source-page filenames: `kebab-case`. Entity and concept filenames: `TitleCase`.
 - Frontmatter `confidence` reflects evidence strength: `low` (single weak source), `medium` (single solid source or multiple weak), `high` (multiple corroborating sources).
+
+---
+
+> **移行のお知らせ**: このコマンドは `skills/wiki-ingest/SKILL.md` へ移行しました。
+> 内容の正本はそちらで、CLIの呼び出しもPython Core（`core/llmwiki.py`）へ
+> 更新されています。このファイルは既存利用者のための互換配置として残しています
+> （削除の検討は将来のv2）。新規に導入する場合は Skills 側を使ってください。

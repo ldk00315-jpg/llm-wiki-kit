@@ -127,19 +127,34 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\llm-wiki.ps1 unl
 場所では黙って何もしません。フック内部で失敗した場合は
 `.wiki/diagnostics/hooks.log` に記録を試みます（セッションは壊しません）。
 
-### 3. スラッシュコマンドを配置
+### 3. Skills（操作手順）を配置
 
-`commands/*.md` を `~/.claude/commands/`（全プロジェクト共通）か
-`<プロジェクト>/.claude/commands/`（プロジェクト限定）へコピー:
+`skills/` の6つを、エージェントがSkillを探す場所へコピーします。
 
-| コマンド | 役割 |
+| Skill | 役割 |
 |---|---|
-| `/wiki-ingest <ソース>` | URL・ファイル・テキストを取り込んで統合ページ化 |
-| `/wiki-query <質問>` | Wikiから引用付きで回答（無ければ無いと言う） |
-| `/wiki-health` | 構造チェック（トークン消費なし・毎日OK） |
-| `/wiki-lint` | 内容の品質チェック（矛盾・リンク切れ・陳腐化） |
-| `/wiki-graph` | ページ関係のグラフをHTML出力 |
-| `/wiki-overview` | 全体俯瞰ページを再生成 |
+| `wiki-ingest <ソース>` | URL・ファイル・テキストを取り込んで統合ページ化 |
+| `wiki-query <質問>` | Wikiから引用付きで回答（無ければ無いと言う） |
+| `wiki-health` | 構造チェック（トークン消費なし・毎日OK） |
+| `wiki-lint` | 内容の品質チェック（矛盾・孤立・陳腐化・出典の弱さ） |
+| `wiki-graph` | ページ関係のグラフをオフラインHTMLで出力 |
+| `wiki-overview` | 入口ページを現在の状態から書き直す |
+
+配置先の例:
+
+```powershell
+# Claude Code（全プロジェクト共通）
+Copy-Item -Recurse skills\* $env:USERPROFILE\.claude\skills
+# Codex（リポジトリ内・cwdからrootまでの各階層が探索される）
+Copy-Item -Recurse skills\* <プロジェクト>\.agents\skills```
+
+各 `SKILL.md` の frontmatter は `name` と `description` だけに絞ってあります。
+これはオープンなAgent Skillsの**共通部分集合**で、ホスト固有のメタデータは
+持ち込まない方針です（詳細は `docs/cross-agent-design.md` 決定#7）。
+
+**旧 `commands/*.md` も残しています**が、内容の正本はSkills側です。
+既存利用者の互換のために置いてあるだけなので、新規導入ではSkillsを使って
+ください（削除の検討は将来のv2）。
 
 ### 4. 動作確認
 
@@ -209,10 +224,12 @@ scripts/llm-wiki.ps1         互換wrapper（従来の呼び出し形→Python c
 hooks/wiki_index_hook.py     呼び出しインデックス＋compact回復注入（SessionStartフック）
 hooks/precompact_hook.py     境界マーカーのディスク永続化（PreCompactフック）
 adapters/codex/              Codex SessionStartアダプター＋hooks.json設定例
-commands/wiki-*.md           Claude Code スラッシュコマンド6本
+skills/wiki-*/SKILL.md       操作手順6本（Agent Skills共通部分集合）
+commands/wiki-*.md           旧スラッシュコマンド6本（互換のため保持）
 tests/smoke.ps1              挙動パリティ回帰（28 assertion・wrapper経由でcoreを検証）
 tests/test_core.py           coreユニットテスト（lock/atomic/F-06/往復）
 tests/test_codex_adapter.py  CodexのJSON/BOM/compact/設定契約テスト
+tests/test_skills.py         Skillsの構造契約（共通部分集合・CLI参照）
 docs/cross-agent-design.md   クロスエージェント設計書（Claude×Codex合意済み）
 template/.wiki/              Wikiの雛形（スキーマ＋WALジャーナル＋サンプルページ＋raw実体入り）
 template/.wiki/.obsidian/    Obsidian用の設定済みVault構成（任意・無くても動く）
