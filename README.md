@@ -31,7 +31,7 @@ Andrej Karpathy が提唱した LLM Wiki のアイデア（raw は不変・synth
 
 ## 動作要件
 
-- **Python 3.10+** — フック2本のランタイム（外部パッケージ依存はなし）
+- **Python 3.10+** — Coreとフック／アダプターのランタイム（外部パッケージ依存はなし）
 - **PowerShell** — メンテCLI用。Windows標準の Windows PowerShell 5.1 で動きます
   （`powershell.exe -NoProfile -ExecutionPolicy Bypass -File ...` で実行）。
   PowerShell 7 (`pwsh`) があればそのまま `pwsh -File ...` でも可。
@@ -167,6 +167,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\llm-wiki.ps1 unl
 
 これを貼らない場合、Wikiは `/wiki-ingest` の明示実行でしか育ちません。
 
+## Codexで使う
+
+Codex用の `SessionStart` アダプターと `hooks.json` の設定例を同梱しています。
+絶対パスの設定、Windowsの `commandWindows`、フックの信頼レビューを含む手順は
+[`docs/codex-adapter.md`](docs/codex-adapter.md) を参照してください。Coreが生成する
+索引とcompact回復ブロックはClaude Code版と同一で、Codex側では
+`hookSpecificOutput.additionalContext` へJSON包装して注入します。
+
 ## Obsidianで見る（任意・おまけ）
 
 Wikiの実体はただのMarkdownフォルダなので、[Obsidian](https://obsidian.md/) で
@@ -200,9 +208,11 @@ core/llmwiki.py              メンテCLIの正本（Python・lock/atomic write/
 scripts/llm-wiki.ps1         互換wrapper（従来の呼び出し形→Python coreへ委譲）
 hooks/wiki_index_hook.py     呼び出しインデックス＋compact回復注入（SessionStartフック）
 hooks/precompact_hook.py     境界マーカーのディスク永続化（PreCompactフック）
+adapters/codex/              Codex SessionStartアダプター＋hooks.json設定例
 commands/wiki-*.md           Claude Code スラッシュコマンド6本
 tests/smoke.ps1              挙動パリティ回帰（28 assertion・wrapper経由でcoreを検証）
 tests/test_core.py           coreユニットテスト（lock/atomic/F-06/往復）
+tests/test_codex_adapter.py  CodexのJSON/BOM/compact/設定契約テスト
 docs/cross-agent-design.md   クロスエージェント設計書（Claude×Codex合意済み）
 template/.wiki/              Wikiの雛形（スキーマ＋WALジャーナル＋サンプルページ＋raw実体入り）
 template/.wiki/.obsidian/    Obsidian用の設定済みVault構成（任意・無くても動く）

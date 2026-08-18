@@ -1,0 +1,20 @@
+{
+  "description": "Inject the LLM Wiki index when a Codex session starts.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"/absolute/path/to/llm-wiki-kit/adapters/codex/session_start.py\"",
+            "commandWindows": "python \"C:\\absolute\\path\\to\\llm-wiki-kit\\adapters\\codex\\session_start.py\"",
+            "timeout": 10,
+            "statusMessage": "Loading LLM Wiki index",
+            "additionalContextLimit": 0
+          }
+        ]
+      }
+    ]
+  }
+}
