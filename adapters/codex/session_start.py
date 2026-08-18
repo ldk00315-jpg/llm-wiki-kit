@@ -81,6 +81,7 @@ def log_failure(root: Path | None, message: str) -> None:
 
 def main() -> None:
     if build_index_context is None or find_wiki_root is None:
+        log_failure(_fallback_wiki_root(), "Core import unavailable")
         return
 
     root = find_wiki_root()
@@ -117,4 +118,3 @@ if __name__ == "__main__":
             log_failure(root, repr(exc))
         except Exception:
             pass
-

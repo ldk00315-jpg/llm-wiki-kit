@@ -28,8 +28,8 @@ class TestCodexAdapter(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def _page(self, title="Codex <context> page", summary="line one line two"):
-        path = self.root / "wiki" / "concepts" / "Codex.md"
+    def _page(self, title="Codex <context> page", summary="line one line two", name="Codex"):
+        path = self.root / "wiki" / "concepts" / f"{name}.md"
         llmwiki.atomic_write_text(path, (
             "---\n"
             f"title: {llmwiki.yaml_scalar_encode(title)}\n"
@@ -84,6 +84,20 @@ class TestCodexAdapter(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, b"")
         self.assertEqual(result.stderr, b"")
+
+    def test_multiline_context_of_several_thousand_chars_stays_valid_json(self):
+        for i in range(120):
+            self._page(
+                title=f"Page {i:03d} " + "long-title-" * 3,
+                summary="A reusable finding with enough detail for realistic budget testing. " * 3,
+                name=f"Page{i:03d}",
+            )
+        result = self._run(b'{"source":"startup"}')
+        context = json.loads(result.stdout.decode("utf-8"))["hookSpecificOutput"]["additionalContext"]
+        self.assertGreater(len(context), 5000)
+        self.assertLessEqual(len(context), 8000)
+        self.assertIn("省略", context)
+        self.assertTrue(context.endswith(llmwiki.CONTEXT_END))
 
     def test_non_object_or_malformed_input_does_not_break_startup(self):
         self._page()
