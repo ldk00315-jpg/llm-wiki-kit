@@ -1,6 +1,6 @@
 ---
 name: wiki-health
-description: Wikiの構造チェック（決定論的・LLMトークンを使わない・毎セッション実行可）
+description: Wikiの構造を決定論的に点検する軽量ヘルスチェック。日常確認や変更後の検証に使う
 ---
 
 # wiki-health
@@ -29,6 +29,9 @@ description: Wikiの構造チェック（決定論的・LLMトークンを使わ
 
 決定論的な操作はCore CLI（Python・依存ゼロ）が担う。索引・ログ・lockの
 一貫性はCLI側で保証されるので、**同等の操作を手で書かない**こと。
+ただしCore CLIに専用commandが無い本文等の操作はlock対象外であり、外部エディタと
+同じ扱いになる。同じファイルを複数エージェントで同時編集せず、保存直前に
+再読込して外部変更がないことを確認する。
 
 ```
 python <kit>/core/llmwiki.py <command> --wiki-root <vault>

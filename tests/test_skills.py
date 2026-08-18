@@ -78,6 +78,14 @@ class TestSkillStructure(unittest.TestCase):
             with self.subTest(skill=skill):
                 self.assertIn("## 引数", text)
 
+    def test_direct_write_lock_boundary_is_explicit(self):
+        """Core未対応の本文生成までlock済みと誤認させない（決定#8の限定）。"""
+        for skill in sorted(EXPECTED):
+            text = (SKILLS / skill / "SKILL.md").read_text(encoding="utf-8")
+            with self.subTest(skill=skill):
+                self.assertIn("lock対象外", text)
+                self.assertRegex(text, r"保存直前に\s*再読込")
+
     def test_legacy_commands_kept_for_compatibility(self):
         """決定#11の段階移行: 旧配置は互換のため残す（削除はv2で検討）。"""
         legacy = {p.stem for p in COMMANDS.glob("wiki-*.md")}

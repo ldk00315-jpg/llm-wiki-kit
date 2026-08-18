@@ -135,7 +135,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\llm-wiki.ps1 unl
 |---|---|
 | `wiki-ingest <ソース>` | URL・ファイル・テキストを取り込んで統合ページ化 |
 | `wiki-query <質問>` | Wikiから引用付きで回答（無ければ無いと言う） |
-| `wiki-health` | 構造チェック（トークン消費なし・毎日OK） |
+| `wiki-health` | 決定論的な構造チェック（軽量・毎日OK） |
 | `wiki-lint` | 内容の品質チェック（矛盾・孤立・陳腐化・出典の弱さ） |
 | `wiki-graph` | ページ関係のグラフをオフラインHTMLで出力 |
 | `wiki-overview` | 入口ページを現在の状態から書き直す |
@@ -144,9 +144,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\llm-wiki.ps1 unl
 
 ```powershell
 # Claude Code（全プロジェクト共通）
+New-Item -ItemType Directory -Force $env:USERPROFILE\.claude\skills | Out-Null
 Copy-Item -Recurse skills\* $env:USERPROFILE\.claude\skills
 # Codex（リポジトリ内・cwdからrootまでの各階層が探索される）
-Copy-Item -Recurse skills\* <プロジェクト>\.agents\skills```
+New-Item -ItemType Directory -Force <プロジェクト>\.agents\skills | Out-Null
+Copy-Item -Recurse skills\* <プロジェクト>\.agents\skills
+```
 
 各 `SKILL.md` の frontmatter は `name` と `description` だけに絞ってあります。
 これはオープンなAgent Skillsの**共通部分集合**で、ホスト固有のメタデータは
@@ -223,13 +226,14 @@ core/llmwiki.py              メンテCLIの正本（Python・lock/atomic write/
 scripts/llm-wiki.ps1         互換wrapper（従来の呼び出し形→Python coreへ委譲）
 hooks/wiki_index_hook.py     呼び出しインデックス＋compact回復注入（SessionStartフック）
 hooks/precompact_hook.py     境界マーカーのディスク永続化（PreCompactフック）
-adapters/codex/              Codex SessionStartアダプター＋hooks.json設定例
+adapters/codex/              Codex SessionStart／PreCompactアダプター＋hooks.json設定例
 skills/wiki-*/SKILL.md       操作手順6本（Agent Skills共通部分集合）
 commands/wiki-*.md           旧スラッシュコマンド6本（互換のため保持）
 tests/smoke.ps1              挙動パリティ回帰（28 assertion・wrapper経由でcoreを検証）
 tests/test_core.py           coreユニットテスト（lock/atomic/F-06/往復）
 tests/test_codex_adapter.py  CodexのJSON/BOM/compact/設定契約テスト
 tests/test_skills.py         Skillsの構造契約（共通部分集合・CLI参照）
+tests/test_cross_agent.py    同一fixtureによるClaude Code／Codex契約テスト
 docs/cross-agent-design.md   クロスエージェント設計書（Claude×Codex合意済み）
 template/.wiki/              Wikiの雛形（スキーマ＋WALジャーナル＋サンプルページ＋raw実体入り）
 template/.wiki/.obsidian/    Obsidian用の設定済みVault構成（任意・無くても動く）
@@ -242,7 +246,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\smoke.ps1
 ```
 
 fresh init・lint・YAMLエスケープ・日本語slug・read-only性・created保存など
-14項目の回帰テスト。一時ディレクトリだけを操作します。
+28項目の回帰テスト。一時ディレクトリだけを操作します。
 
 ## Windowsの注意
 

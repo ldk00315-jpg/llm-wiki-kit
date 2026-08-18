@@ -121,6 +121,7 @@ def log_failure(root, message: str) -> None:
 
 def main():
     if append_compact_boundary_marker is None or find_wiki_root is None:
+        log_failure(_fallback_wiki_root(), "Core import unavailable")
         return
     root = find_wiki_root()
     if root is None:

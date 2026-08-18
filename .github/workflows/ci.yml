@@ -51,6 +51,20 @@ jobs:
       - name: Core unit tests
         run: python -m unittest discover -s tests -v
 
+  adapter-contracts:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Cross-agent adapter contracts
+        run: python tests/test_cross_agent.py -v
+
   hooks-linux:
     runs-on: ubuntu-latest
     strategy:

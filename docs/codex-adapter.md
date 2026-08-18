@@ -1,8 +1,12 @@
-# Codex SessionStartアダプター
+# Codexアダプター
 
 `adapters/codex/session_start.py` は、Coreの `build_index_context()` が返す索引を
 Codexの `SessionStart` フック形式へ包む薄いアダプターです。索引の生成・安全化・
 delimiter・8,000文字上限はCoreだけが担当し、このファイルは変更しません。
+
+`adapters/codex/pre_compact.py` は、Codexの `PreCompact` をCoreの
+`append_compact_boundary_marker()` へ渡し、要約直前の境界をjournalへ永続化します。
+マーカー文言・lock・atomic write・競合検知はCoreだけが担当します。
 
 ## 配線
 
@@ -35,7 +39,10 @@ $env:LLM_WIKI_ROOT = "C:\path\to\workspace\.wiki"
 '{"source":"startup"}' | python adapters\codex\session_start.py
 ```
 
-標準出力は1個のJSONオブジェクトだけです。`source` が `compact` の場合、Coreの
+SessionStartの標準出力は1個のJSONオブジェクトだけです。`source` が `compact` の場合、Coreの
 コンパクション回復ブロックが同じdelimiter内に含まれます。Wikiや対象ページが
 無い場合は何も出力しません。失敗時もセッションを止めず、可能なら
 `.wiki/diagnostics/hooks.log` に診断を追記します。
+
+PreCompactはstdoutへ何も出さず、`trigger`（`manual` / `auto`）を付けた境界を
+`.wiki/inbox/journal.md` へ追記します。transcriptの絶対パスは保存しません。

@@ -36,6 +36,9 @@ frontmatter の `updated` を更新し、`.wiki/log.md` へ
 
 決定論的な操作はCore CLI（Python・依存ゼロ）が担う。索引・ログ・lockの
 一貫性はCLI側で保証されるので、**同等の操作を手で書かない**こと。
+ただしCore CLIに専用commandが無いoverview本文の生成はlock対象外であり、
+外部エディタと同じ扱いになる。同じファイルを複数エージェントで同時編集せず、
+保存直前に再読込して外部変更がないことを確認する。
 
 ```
 python <kit>/core/llmwiki.py <command> --wiki-root <vault>

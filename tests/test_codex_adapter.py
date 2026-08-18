@@ -120,6 +120,13 @@ class TestCodexAdapter(unittest.TestCase):
         self.assertIn("commandWindows", handler)
         self.assertNotIn("powershell", handler["commandWindows"].lower())
         self.assertEqual(handler["type"], "command")
+        pre_group = config["hooks"]["PreCompact"][0]
+        pre_handler = pre_group["hooks"][0]
+        self.assertEqual(pre_group["matcher"], "manual|auto")
+        self.assertIn("pre_compact.py", pre_handler["command"])
+        self.assertIn("commandWindows", pre_handler)
+        self.assertNotIn("powershell", pre_handler["commandWindows"].lower())
+        self.assertNotIn("additionalContextLimit", pre_handler)
 
     @unittest.skipUnless(os.name == "nt", "commandWindows is Windows-only")
     def test_command_runs_via_cmd_exe_without_powershell(self):
@@ -140,6 +147,26 @@ class TestCodexAdapter(unittest.TestCase):
         hook = json.loads(result.stdout.decode("utf-8"))["hookSpecificOutput"]
         self.assertEqual(hook["hookEventName"], "SessionStart")
         self.assertIn("Codex <context> page", hook["additionalContext"])
+
+    @unittest.skipUnless(os.name == "nt", "commandWindows is Windows-only")
+    def test_precompact_command_runs_via_cmd_exe_without_powershell(self):
+        env = os.environ.copy()
+        env["LLM_WIKI_ROOT"] = str(self.root)
+        adapter = REPO / "adapters" / "codex" / "pre_compact.py"
+        command_line = f'cmd.exe /D /S /C python "{adapter}"'
+        result = subprocess.run(
+            command_line,
+            input=b'{"trigger":"auto"}',
+            capture_output=True,
+            cwd=self.workspace,
+            env=env,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
+        self.assertEqual(result.stdout, b"")
+        journal = (self.root / "inbox" / "journal.md").read_text(encoding="utf-8")
+        self.assertIn("PreCompact境界（auto）", journal)
 
 
 if __name__ == "__main__":

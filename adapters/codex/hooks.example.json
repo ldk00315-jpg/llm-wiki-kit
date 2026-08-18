@@ -1,5 +1,5 @@
 {
-  "description": "Inject the LLM Wiki index when a Codex session starts.",
+  "description": "Inject the LLM Wiki index and persist pre-compaction boundaries.",
   "hooks": {
     "SessionStart": [
       {
@@ -12,6 +12,20 @@
             "timeout": 10,
             "statusMessage": "Loading LLM Wiki index",
             "additionalContextLimit": 0
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"/absolute/path/to/llm-wiki-kit/adapters/codex/pre_compact.py\"",
+            "commandWindows": "python \"C:\\absolute\\path\\to\\llm-wiki-kit\\adapters\\codex\\pre_compact.py\"",
+            "timeout": 10,
+            "statusMessage": "Saving LLM Wiki compaction boundary"
           }
         ]
       }
