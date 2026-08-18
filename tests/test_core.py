@@ -372,5 +372,80 @@ class TestBuildIndexContext(TempVaultCase):
         self.assertFalse((self.root / ".lock").exists())
 
 
+class TestJournalAppend(TempVaultCase):
+    """PreCompact境界マーカーのCore側API（Phase 2-2）。"""
+
+    def _journal(self):
+        return (self.root / "inbox" / "journal.md").read_text(encoding="utf-8")
+
+    def test_marker_appended(self):
+        llmwiki.append_compact_boundary_marker(self.root, "auto")
+        text = self._journal()
+        self.assertIn("PreCompact境界（auto）", text)
+        self.assertTrue(text.endswith("\n"))
+
+    def test_existing_content_preserved(self):
+        journal = self.root / "inbox" / "journal.md"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text("# WAL\n\n- [2026-01-01] 既存の1行\n", encoding="utf-8")
+        before = journal.read_text(encoding="utf-8")
+        llmwiki.append_journal_line(self.root, "- [test] 既存行の後ろに足す")
+        after = self._journal()
+        self.assertTrue(after.startswith(before))
+        self.assertIn("既存行の後ろに足す", after)
+
+    def test_no_trailing_newline_is_fixed(self):
+        journal = self.root / "inbox" / "journal.md"
+        journal.write_text("末尾に改行がない行", encoding="utf-8")
+        llmwiki.append_journal_line(self.root, "- 追記行")
+        lines = self._journal().splitlines()
+        self.assertEqual(lines[-2], "末尾に改行がない行")  # 行が融合しない
+        self.assertEqual(lines[-1], "- 追記行")
+
+    def test_transcript_path_not_persisted(self):
+        """R-06: 環境固有の絶対パスをマーカーに含めない。"""
+        marker = llmwiki.compact_boundary_marker("auto")
+        for leak in ("transcript", "C:\\", "/home/", "Users"):
+            self.assertNotIn(leak, marker)
+
+    def test_trigger_is_sanitized_and_bounded(self):
+        marker = llmwiki.compact_boundary_marker("auto\u202e\x07" + "X" * 100)
+        self.assertNotIn("\u202e", marker)
+        self.assertNotIn("\x07", marker)
+        self.assertLess(len(marker), 400)  # triggerが暴れても行が壊れない
+
+    def test_uses_lock_and_fails_closed(self):
+        """他のwriterがlockを保持していたらLockTimeoutを投げる（fail-closed）。"""
+        holder = llmwiki.VaultLock(self.root, timeout=1)
+        holder.acquire()
+        try:
+            with self.assertRaises(llmwiki.LockTimeout):
+                llmwiki.append_compact_boundary_marker(self.root, "auto", lock_timeout=0.4)
+        finally:
+            holder.release()
+        # lock解放後は書ける
+        llmwiki.append_compact_boundary_marker(self.root, "manual")
+        self.assertIn("PreCompact境界（manual）", self._journal())
+
+    def test_creates_journal_when_missing(self):
+        """init直後はjournalが無い（テンプレ配布時のみ存在）。追記APIが作る。"""
+        journal = self.root / "inbox" / "journal.md"
+        self.assertFalse(journal.exists())
+        llmwiki.append_compact_boundary_marker(self.root, "auto")
+        self.assertTrue(journal.exists())
+        self.assertIn("PreCompact境界", journal.read_text(encoding="utf-8"))
+
+    def test_appends_preserve_all_previous_lines(self):
+        """連続追記で行が落ちない・順序が保たれる。"""
+        for i in range(5):
+            llmwiki.append_journal_line(self.root, f"- 行{i}")
+        lines = [l for l in self._journal().splitlines() if l.startswith("- 行")]
+        self.assertEqual(lines, [f"- 行{i}" for i in range(5)])
+
+    def test_no_lock_residue(self):
+        llmwiki.append_compact_boundary_marker(self.root, "auto")
+        self.assertFalse((self.root / ".lock").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

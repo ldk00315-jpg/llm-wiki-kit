@@ -66,9 +66,28 @@ def read_stdin_event() -> dict:
         while raw_b.startswith(utf8_bom):
             raw_b = raw_b[3:]
         raw = raw_b.decode("utf-8", errors="replace").lstrip("﻿").strip()
-        return json.loads(raw) if raw else {}
+        event = json.loads(raw) if raw else {}
+        # 配列や文字列が来ても呼び出し側の .get() を壊さない
+        return event if isinstance(event, dict) else {}
     except Exception:
         return {}
+
+
+def _fallback_wiki_root():
+    """Coreをimportできないときだけ使う、最小限のroot探索（診断ログ用）。"""
+    try:
+        env = os.environ.get("LLM_WIKI_ROOT")
+        if env:
+            candidate = Path(env)
+            return candidate if (candidate / "wiki").is_dir() else None
+        current = Path.cwd().resolve()
+        for parent in (current, *current.parents):
+            candidate = parent / ".wiki"
+            if (candidate / "wiki").is_dir():
+                return candidate
+    except Exception:
+        pass
+    return None
 
 
 def log_failure(root, message: str) -> None:
@@ -109,7 +128,7 @@ if __name__ == "__main__":
         main()
     except Exception as exc:
         try:
-            log_failure(find_wiki_root() if find_wiki_root else None, repr(exc))
+            log_failure(find_wiki_root() if find_wiki_root else _fallback_wiki_root(), repr(exc))
         except Exception:
             pass
         sys.exit(0)  # フックは何があってもセッションを壊さない

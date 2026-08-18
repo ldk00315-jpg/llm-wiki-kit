@@ -575,6 +575,52 @@ def add_log_entry(root: Path, action: str, subject: str, detail: str, locked: bo
         print(f"WARN: log.md changed concurrently; entry saved to {conflict.name}")
 
 
+def append_journal_line(root: Path, line: str, locked: bool = False,
+                        lock_timeout: float = 3.0) -> Path | None:
+    """`inbox/journal.md` へ1行追記する（lock＋atomic write＋変更検知）。
+
+    WAL（先行ログ）は「書けること」が価値なので、通常の書き込みより
+    lock_timeout を短く取る（フックの実行時間制約に収めるため）。
+    lockが取れなければ LockTimeout を投げる —— 呼び出し側が
+    「諦めて診断ログに残す」か「リトライする」かを決める。
+
+    戻り値: 競合時に生成したconflictファイル（正常時 None）
+    """
+    if not locked:
+        with VaultLock(root, timeout=lock_timeout):
+            return append_journal_line(root, line, locked=True)
+    journal = Path(root) / "inbox" / "journal.md"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    snap = _snapshot(journal)
+    existing = journal.read_text(encoding="utf-8-sig") if journal.exists() else ""
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    return atomic_write_text(journal, existing + line + "\n", expect_snapshot=snap)
+
+
+def compact_boundary_marker(trigger: str = "unknown") -> str:
+    """PreCompact境界マーカーの文言を組み立てる（ホスト非依存）。
+
+    transcript_path のような環境固有の絶対パスは**含めない**。
+    OSユーザー名やセッション識別子が `.wiki` の共有・同期経由で
+    漏れる面になるため（Phase 1検証 R-06）。
+    """
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    trigger = sanitize_injection_text(str(trigger)).replace("\n", " ")[:40]
+    return (
+        f"- [{stamp}] **PreCompact境界（{trigger}）** — この行より上の未処理エントリと、"
+        f"直前セッションの未記録wiki級知見を、コンパクション後の最初のターンで"
+        f"ページ化すること。"
+    )
+
+
+def append_compact_boundary_marker(root: Path, trigger: str = "unknown",
+                                   lock_timeout: float = 3.0) -> Path | None:
+    """PreCompact境界マーカーを journal へ追記する（アダプターはこれを呼ぶだけ）。"""
+    return append_journal_line(root, compact_boundary_marker(trigger),
+                               lock_timeout=lock_timeout)
+
+
 # ---------------------------------------------------------------------------
 # ingest
 # ---------------------------------------------------------------------------
