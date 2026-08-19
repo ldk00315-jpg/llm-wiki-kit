@@ -26,6 +26,7 @@ CONTRACT_RULES = {
     "C-5": ["restore", "revert"],      # 復旧は読むことから始める
     "C-6": ["Re-read", "expect_snapshot"],   # lock外編集の楽観的並行制御
     "C-7": ["frontmatter", "index"],   # 本文を弱めたらfrontmatterも弱める
+    "C-8": ["verbatim", "fail closed"],  # WAL checkpointは原文をlossless保全
 }
 
 SECTION_HEADING = "## Shared-Vault operating rules"

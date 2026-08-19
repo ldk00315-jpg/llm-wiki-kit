@@ -272,6 +272,36 @@ body is read only by whoever opens the page. Correct the body alone and **the
 un-corrected claim is the one that keeps circulating** — wider than the error you just
 fixed. This is a context-distribution safety rule, not document tidiness.
 
+### C-8: A WAL checkpoint preserves the originals losslessly
+
+Deleting lines from `inbox/journal.md` is a **WAL checkpoint** — an irreversible
+operation. Before any line is deleted, each deleted line must be persisted to `raw/`
+**verbatim**. Organized, condensed, or thematic write-ups may coexist with the
+originals; they may **not replace** them.
+
+> **Duplication is recoverable. Loss is not.** When in doubt, keep both.
+
+Completion conditions for a checkpoint — all of them:
+
+1. Every line to be deleted exists in `raw/` verbatim.
+2. That was **machine-verified** as an exact match (newline normalization only),
+   preserving duplicate counts. Eyeballing cannot spot what a summary dropped, and
+   word-coverage ratios are diagnostics, not proof of preservation.
+3. The verification is deterministic and fails loudly on any missing line.
+4. Only after the raw is atomically saved **and** verified are the verified lines
+   deleted from the journal (atomic save). On partial failure, external modification,
+   or any unclear state: leave the journal as is — **fail closed**.
+
+What this rule does **not** forbid: a freshly written agent-authored workspace note is
+itself a first-hand record and belongs in `raw/`. The rule forbids **replacing existing
+input — journal lines, prior raws, external sources — with only a summary of it**.
+
+*Origin (2026-08-19): a stocktake condensed 25 dense journal pointers into a thematic
+summary and deleted the originals. The themes survived; the reusable specifics (URL
+parameter formats, encodings, formulas, validation steps) did not. The summarizer
+cannot see what it dropped: the missing details are, by definition, not on the page
+being reread.*
+
 ## Safety rules
 
 - Never invent facts to fill pages. Every claim on a synthesized page traces to a raw source.
