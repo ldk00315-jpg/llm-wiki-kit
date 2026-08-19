@@ -65,7 +65,7 @@ class TestSchemaContract(unittest.TestCase):
         self.assertTrue(SCHEMA.is_file(), f"schema not found: {SCHEMA}")
 
     def test_shared_vault_section_exists(self):
-        """C-1〜C-7 が1箇所に集まっていること（契約が散ると探せない）。"""
+        """C-1〜C-8 が1箇所に集まっていること（契約が散ると探せない）。"""
         self.assertIn(
             SECTION_HEADING,
             self.text,
@@ -73,7 +73,7 @@ class TestSchemaContract(unittest.TestCase):
         )
 
     def test_all_contract_rules_present(self):
-        """C-1〜C-7 それぞれの見出しが存在すること。"""
+        """C-1〜C-8 それぞれの見出しが存在すること。"""
         missing = []
         for rule in CONTRACT_RULES:
             if not any(rule in heading for heading in self.sections):
