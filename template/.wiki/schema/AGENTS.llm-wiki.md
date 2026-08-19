@@ -166,6 +166,14 @@ page body outside Core requires:
 
 Core exposes `atomic_write_text(..., expect_snapshot=...)` for exactly this check.
 
+### Correcting a page — weaken the frontmatter with the body
+
+**If you change or narrow a claim in the body, check the frontmatter in the same edit.**
+`title` and `summary` are injected into every session through the passive index; the
+body is read only by whoever opens the page. Correct the body alone and **the
+un-corrected claim is the one that keeps circulating** — wider than the error you just
+fixed. This is a context-distribution safety rule, not document tidiness.
+
 ### Compaction boundary rule — never let wiki-grade knowledge cross a compaction
 
 Long sessions get compacted (summarized). Compaction keeps *what was done* and drops *why, the details, and the failure path* — exactly the meat of wiki-grade knowledge. The moment knowledge is freshest (a bloated context) is also the moment just before it is lost. Therefore:
