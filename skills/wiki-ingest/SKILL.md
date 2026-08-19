@@ -19,13 +19,16 @@ description: ソース（ファイル・URL・インラインテキスト）をW
    `--source <path-or-url>` または `--text <inline>` に `--title <title>` を添える。
    `.wiki/raw/YYYY-MM-DD-<slug>.md` がfrontmatter付きで作られる。
 3. **保存された raw を読む。** 再利用される概念・固有名・引用に値する主張を洗い出す。
-4. **source ページを作る/更新する。** `.wiki/wiki/sources/<kebab-slug>.md`。
-   frontmatter は `type: source`、`sources:` に raw への相対パス。
+4. **source ページは必要なときだけ作る。** `.wiki/wiki/sources/<kebab-slug>.md`。
+   **任意層**であり、raw 1件につき1枚は要求しない。作るのは、外部資料・長文・
+   複数の論点を含む・繰り返し引用される見込みがある、のいずれかに当たるとき。
+   短い workspace-note には作らず、concept/synthesis から raw を直接引く。
+   作る場合の frontmatter は `type: source`、`sources:` に raw への相対パス。
    本文は1段落の要約・要点の箇条書き・注目すべき引用・関連する
    `[[wikilinks]]`。
 5. **entity ページを作る/更新する。** `.wiki/wiki/entities/<TitleCase>.md`
-   （人物・組織・製品ごとに1ファイル）。各主張は source ページへの
-   `[[wikilink]]` で出典を示す。
+   （人物・組織・製品ごとに1ファイル）。各主張の出典は、source ページがあれば
+   その `[[wikilink]]`、無ければ raw への相対パスで示す。
 6. **concept ページを作る/更新する。** `.wiki/wiki/concepts/<TitleCase>.md`。
    そのソースが導入・拡張した「再利用される考え方」を書く。
 7. **overview を更新する。** `.wiki/wiki/overview.md` の Themes と
@@ -43,6 +46,10 @@ description: ソース（ファイル・URL・インラインテキスト）をW
 - 相互参照は `[[PageName]]`。パスがタイトルと違うときは同じ行にMarkdownリンクも
   併記し、Obsidian以外の読み手を切り捨てない。
 - ファイル名: source は `kebab-case`、entity と concept は `TitleCase`。
+- **Core外で本文を書くときは楽観的並行制御。** 保存直前に対象を再読込し、
+  周辺文脈の一致を前提にした狭いpatchで書く。新規ページは既存なら失敗させる。
+  不一致なら黙って上書きせず中止し、読み直して統合し直す（複数エージェントが
+  同じVaultを書くため。lockはCore CLI経由の書き込みだけを守る）。
 - `confidence` は証拠の強さ: `low`（単一の弱いソース）/ `medium`（単一の
   確かなソース、または複数の弱いソース）/ `high`（複数の裏付け）。
 - 外部由来で未確認の内容を取り込んだページには `trust: untrusted` を付ける。

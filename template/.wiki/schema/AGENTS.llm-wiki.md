@@ -29,7 +29,7 @@ Maintain a compounding Markdown knowledge base owned by the agent. Raw sources a
 └── wiki/                         # LLM-owned synthesis
     ├── _index.md                 # catalog of every wiki page
     ├── overview.md               # living single-page synthesis (entry point)
-    ├── sources/                  # one summary page per ingested raw source
+    ├── sources/                  # optional source-level synthesis (see below)
     ├── entities/                 # one page per named person/org/product
     ├── concepts/                 # one page per durable idea/framework
     └── syntheses/                # query answers filed as durable pages
@@ -54,10 +54,21 @@ confidence: low | medium | high
 
 `sources:` is a list of paths or `[[wikilinks]]`. `confidence` reflects evidence strength (`low` = single weak source, `high` = multiple corroborating sources).
 
+### Source pages are optional
+
+`wiki/sources/` is an **optional** layer. Create a source page only when the raw is
+external, long, carries multiple distinct claims, or will be re-cited enough that a
+stable per-source summary earns its keep. Short workspace notes do **not** get one —
+concept and synthesis pages cite the raw directly.
+
+**Raw count and source-page count are not expected to match.** `wiki-health` checks
+that existing source pages point at real raws, and does **not** flag raws that have
+no source page.
+
 ## Naming
 
 - Raw files: `YYYY-MM-DD-<kebab-slug>.md`
-- Source pages (`wiki/sources/`): `<kebab-slug>.md`
+- Source pages (`wiki/sources/`): `<kebab-slug>.md` — **optional layer**, see above
 - Entity pages (`wiki/entities/`): `<TitleCase>.md`
 - Concept pages (`wiki/concepts/`): `<TitleCase>.md`
 - Synthesis pages (`wiki/syntheses/`): `<kebab-slug>.md`
@@ -74,7 +85,8 @@ Driven by `/wiki-ingest` (see the kit's `commands/wiki-ingest.md`). High-level:
 
 1. Save the raw source via the maintenance CLI (`llm-wiki.ps1 ingest …` — on Windows PowerShell 5.1 run it as `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/llm-wiki.ps1 ingest …`; with PowerShell 7 use `pwsh -File …`).
 2. Read it; extract durable concepts, entities, claims, contradictions, open questions.
-3. Create or update a source page, plus relevant entity and concept pages.
+3. Create or update the relevant entity and concept pages. Create a **source page**
+   only when the raw warrants one (see "Source pages are optional" above).
 4. Refresh `wiki/overview.md`.
 5. Reindex via the same CLI: `… llm-wiki.ps1 reindex`.
 6. Append a `## [YYYY-MM-DD] ingest | <title>` entry to `log.md` listing the new/updated pages.
@@ -85,7 +97,7 @@ Driven by `/wiki-query`. Read `_index.md` first, then the smallest set of releva
 
 ### Health
 
-Driven by `/wiki-health`. Fast structural check (no LLM tokens): missing files, missing frontmatter, missing `sources:`, broken indexes, log gaps, empty stubs. Safe to run every session.
+Driven by `/wiki-health`. Fast deterministic structural check: missing files, missing frontmatter, missing `sources:`, broken indexes, log gaps, empty stubs. Existing source pages must point at real raws; raws **without** a source page are not an error (the layer is optional). Safe to run every session.
 
 ### Lint
 
@@ -129,6 +141,30 @@ Work produces something the user would want to find again:
 4. If a synthesized page was created or an entity/concept was added, run the maintenance CLI's `reindex` (see the Ingest section for the invocation form). If only an existing page was edited in place, skip the reindex.
 
 Keep it light. One small raw file plus one wiki-page touch is the typical capture. If a raw note is growing long, the signal probably belongs in the synthesized page instead.
+
+If more than one agent writes this Vault, give new raw notes an `agent: <host>`
+frontmatter field so provenance survives outside version control. Do not backfill
+existing raws — that would be guessing.
+
+### Writing outside the lock — optimistic concurrency
+
+Core's `VaultLock` protects writes that go through the Core CLI (raw ingest, index,
+log, journal). It does **not** protect a page body edited directly — that is treated
+like an external editor. Version control gives after-the-fact recovery; it does
+**not** prevent an overwrite.
+
+When more than one agent (or a human with an editor) can write this Vault, editing a
+page body outside Core requires:
+
+1. **Re-read immediately before writing.** Never write from a copy read minutes ago.
+2. **Apply a narrow patch that asserts its surrounding context**, not a whole-file
+   overwrite. If the context no longer matches, the file changed underneath you.
+3. **Create new pages exclusively.** If the path already exists, fail rather than
+   overwrite — someone may have just created the page you are about to create.
+4. **On mismatch, stop.** Re-read, merge deliberately, then write. Or leave a
+   `.conflict` copy beside the file. Never overwrite silently.
+
+Core exposes `atomic_write_text(..., expect_snapshot=...)` for exactly this check.
 
 ### Compaction boundary rule — never let wiki-grade knowledge cross a compaction
 

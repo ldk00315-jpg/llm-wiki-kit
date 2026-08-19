@@ -17,6 +17,7 @@ description: Wikiの構造を決定論的に点検する軽量ヘルスチェッ
    frontmatterの開始と終端、`sources:` の有無、
    引用符なしの「コロン+空白」、方言外エスケープ、C0制御文字。
 2. `.wiki/wiki/sources/` の各ページが、`sources:` で実在の raw を指しているか。
+   **逆は検査しない**——source ページを持たない raw は誤りではない（任意層）。
 3. `.wiki/log.md` に各 source ページ相当の ingest 記録があるか。
 4. 空スタブ（本文が概ね200文字未満の統合ページ）を一覧する。
 
