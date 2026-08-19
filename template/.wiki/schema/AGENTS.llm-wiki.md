@@ -1,8 +1,8 @@
 ---
 title: LLM Wiki Schema
-summary: Operating contract for any agent reading or writing the workspace LLM Wiki at .wiki/.
+summary: Operating contract for any agent reading or writing the workspace LLM Wiki at .wiki/. Includes the shared-Vault rules C-1…C-7 that keep multiple writers from diverging.
 created: 2026-08-05
-updated: 2026-08-10
+updated: 2026-08-19
 ---
 
 # LLM Wiki Schema
@@ -146,7 +146,105 @@ If more than one agent writes this Vault, give new raw notes an `agent: <host>`
 frontmatter field so provenance survives outside version control. Do not backfill
 existing raws — that would be guessing.
 
-### Writing outside the lock — optimistic concurrency
+### Compaction boundary rule — never let wiki-grade knowledge cross a compaction
+
+Long sessions get compacted (summarized). Compaction keeps *what was done* and drops *why, the details, and the failure path* — exactly the meat of wiki-grade knowledge. The moment knowledge is freshest (a bloated context) is also the moment just before it is lost. Therefore:
+
+1. **Write it now.** Once something qualifies under "Capture when", record it in the same stretch of work — do not defer to end-of-session, which a compaction may never let arrive.
+2. **One-line journal as WAL.** When unsure whether something is wiki-grade, or when mid-task with no room for a full capture, append one line to `.wiki/inbox/journal.md`:
+   `- [YYYY-MM-DD] <one-line pointer to the insight and where it happened>`
+   This is a write-ahead log: the pointer survives outside the context window even if the session is compacted before the full page is written. Full page creation happens at the next natural pause.
+3. **A bloated context is the stocktake signal.** Context size is a proxy for accumulated session knowledge. When compaction is near (or has just happened), review `.wiki/inbox/journal.md`, promote entries that qualify into pages, and delete the promoted lines. The journal should trend toward empty.
+4. **Environment-side backstop.** Wire the kit's `hooks/precompact_hook.py` (PreCompact) and `hooks/wiki_index_hook.py` (SessionStart) — see the kit README. The former appends a durable boundary marker to `inbox/journal.md` just before compaction; the latter injects a recovery instruction when the session resumes with `source: "compact"`. Both are safety nets, not substitutes for rules 1-3.
+
+### Wiki vs. memory boundary
+
+- **Wiki** holds *work content* — decisions about this codebase, findings about this system, patterns adopted in this workspace, reusable recipes.
+- **Memory** holds *collaboration context* — how the user prefers to work, current project state, references to external systems.
+
+When in doubt: if a future agent reading the workspace cold would benefit, it's wiki. If a future agent collaborating with the user would benefit, it's memory.
+
+## Shared-Vault operating rules (C-1 … C-7)
+
+These apply whenever **more than one writer** touches this Vault — two agents, or an
+agent plus a human with an editor. They are derived from a real incident, not theory.
+
+> **The failure mode of a shared Vault is not collision — it is divergence.**
+> On the first day of shared operation between two agents, the same finding was
+> recorded twice, in two different pages. No lock contended. No `.conflict` file
+> appeared. Every mechanism worked as designed, and the knowledge still split in two.
+> Locks protect *simultaneous writes*; they do not protect against *the same subject
+> being filed on two different shelves*. That is what C-1 … C-3 are for.
+
+If only one writer ever touches this Vault, C-1 … C-5 cost you nothing to keep.
+
+### C-1: Do not trust the index — verify against the live files before writing
+
+The injected index is a **snapshot taken when your session started**. Pages another
+writer added today are **not in it**. This is a structural property of passive
+injection, not a bug.
+
+Before creating a page, and before making a substantial addition to one:
+
+1. Read the **live files across all of `wiki/`** — filename, `title`, `summary` — and
+   search for the subject. Do not look only in `concepts/`: near-duplicates hide in
+   `syntheses/` and `entities/`, and a page may exist under a different name.
+2. Read the candidate page's own scope declaration (see C-3) before assuming it fits.
+3. **Re-check immediately before writing**, not only when you started thinking about it.
+
+Do **not** compare the index's page count against a directory's file count to decide
+whether the index is stale — **the populations differ**. That comparison produces
+false confidence.
+
+Do **not** run a reindex just to make your own judgement easier: that writes a shared
+file before the decision is made, and adds contention where there was none.
+
+### C-2: Check fit before adding to an existing page
+
+Before appending to an existing page, read its `title`, `summary`, and scope
+declaration, and confirm your addition **belongs to that subject**. If it does not,
+create a new page and link to it from the existing one with a single line.
+
+*Origin: operational knowledge about a current toolkit was appended to a page about a
+different, much older project — because the index made it look like the closest shelf.
+The addition was correct; the shelf was not.*
+
+### C-3: Declare what a page does and does not cover
+
+Where several pages sit near the same subject, open each one with a one-line
+declaration of what it covers and what it does not. This is what lets the next
+reader — human or agent — pick the right shelf instead of the nearest one.
+
+### C-4: Do not auto-commit a shared working tree
+
+If this Vault is under version control and more than one writer touches it, an agent
+running `git add` / `git commit` on its own will sweep up the other writer's
+unfinished edits, and can collide on `.git/index.lock`.
+
+- A Vault may name one **commit coordinator**. **If none is named, no agent commits.**
+- Every non-coordinator writer **writes files and does not commit**.
+- The coordinator never uses `git add -A`. It stages **explicit paths it has reviewed**,
+  and does not mix two writers' changes into one commit.
+- Commit messages name the writing agent, e.g. `wiki(<agent>): …`.
+
+A writer that does not commit should leave a line in `inbox/journal.md` saying *why*
+it changed something, so the coordinator can fold that reason into the commit message.
+The journal already exists as a WAL; no new mechanism is needed.
+
+### C-5: Recovery starts with reading, not with a destructive command
+
+`git checkout -- <path>` **discards uncommitted work** and must not be the default move.
+
+1. Look first: `git -C <vault> status`, `git diff`, `git log --oneline -- <path>`.
+2. Identify the exact commit and path to restore.
+3. **After a human approves**, use `git restore --source=<commit> -- <path>` or
+   `git revert <commit>`, naming the path explicitly. Never restore the whole tree
+   as a reflex.
+
+Always pass `-C <vault>` so the operation cannot land on a different repository than
+you intended.
+
+### C-6: Writing outside the lock — optimistic concurrency
 
 Core's `VaultLock` protects writes that go through the Core CLI (raw ingest, index,
 log, journal). It does **not** protect a page body edited directly — that is treated
@@ -166,31 +264,13 @@ page body outside Core requires:
 
 Core exposes `atomic_write_text(..., expect_snapshot=...)` for exactly this check.
 
-### Correcting a page — weaken the frontmatter with the body
+### C-7: Correcting a page — weaken the frontmatter with the body
 
 **If you change or narrow a claim in the body, check the frontmatter in the same edit.**
 `title` and `summary` are injected into every session through the passive index; the
 body is read only by whoever opens the page. Correct the body alone and **the
 un-corrected claim is the one that keeps circulating** — wider than the error you just
 fixed. This is a context-distribution safety rule, not document tidiness.
-
-### Compaction boundary rule — never let wiki-grade knowledge cross a compaction
-
-Long sessions get compacted (summarized). Compaction keeps *what was done* and drops *why, the details, and the failure path* — exactly the meat of wiki-grade knowledge. The moment knowledge is freshest (a bloated context) is also the moment just before it is lost. Therefore:
-
-1. **Write it now.** Once something qualifies under "Capture when", record it in the same stretch of work — do not defer to end-of-session, which a compaction may never let arrive.
-2. **One-line journal as WAL.** When unsure whether something is wiki-grade, or when mid-task with no room for a full capture, append one line to `.wiki/inbox/journal.md`:
-   `- [YYYY-MM-DD] <one-line pointer to the insight and where it happened>`
-   This is a write-ahead log: the pointer survives outside the context window even if the session is compacted before the full page is written. Full page creation happens at the next natural pause.
-3. **A bloated context is the stocktake signal.** Context size is a proxy for accumulated session knowledge. When compaction is near (or has just happened), review `.wiki/inbox/journal.md`, promote entries that qualify into pages, and delete the promoted lines. The journal should trend toward empty.
-4. **Environment-side backstop.** Wire the kit's `hooks/precompact_hook.py` (PreCompact) and `hooks/wiki_index_hook.py` (SessionStart) — see the kit README. The former appends a durable boundary marker to `inbox/journal.md` just before compaction; the latter injects a recovery instruction when the session resumes with `source: "compact"`. Both are safety nets, not substitutes for rules 1-3.
-
-### Wiki vs. memory boundary
-
-- **Wiki** holds *work content* — decisions about this codebase, findings about this system, patterns adopted in this workspace, reusable recipes.
-- **Memory** holds *collaboration context* — how the user prefers to work, current project state, references to external systems.
-
-When in doubt: if a future agent reading the workspace cold would benefit, it's wiki. If a future agent collaborating with the user would benefit, it's memory.
 
 ## Safety rules
 
