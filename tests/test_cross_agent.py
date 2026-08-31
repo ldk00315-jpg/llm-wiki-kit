@@ -112,10 +112,10 @@ class AdapterContractCase(unittest.TestCase):
         )
         for context in contexts:
             self.assertLessEqual(len(context), 8000)
-            self.assertRegex(context, r"更新が古い\d+件を省略")
+            self.assertRegex(context, r"残り\d+件を省略")
             self.assertTrue(context.endswith(llmwiki.CONTEXT_END))
         self.assertEqual(self._rows(contexts[0]), self._rows(contexts[1]))
-        omitted = [re.search(r"更新が古い(\d+)件を省略", context).group(1) for context in contexts]
+        omitted = [re.search(r"残り(\d+)件を省略", context).group(1) for context in contexts]
         self.assertEqual(omitted[0], omitted[1])
 
     def test_compact_recovery_contract_matches_on_both_hosts(self):

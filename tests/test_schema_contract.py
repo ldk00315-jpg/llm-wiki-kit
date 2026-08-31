@@ -124,6 +124,11 @@ class TestSchemaContract(unittest.TestCase):
             "summaryが共有Vault規約に触れていない。"
             "本文を拡張したらfrontmatterも合わせること（C-7）",
         )
+        self.assertIn(
+            "C-8", front,
+            "summaryがC-8（WAL checkpoint）まで追随していない。"
+            "本文の規約を増やしたらfrontmatterも合わせること（C-7の自己適用・N-04）",
+        )
 
 
 if __name__ == "__main__":

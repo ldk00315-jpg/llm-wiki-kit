@@ -360,19 +360,23 @@ class TestBuildIndexContext(TempVaultCase):
     # --- 選択ロジックの回帰テスト（2026-08-31 R-02: recency-based選択の契約固定）---
 
     def test_recency_selects_newer_pages_first(self):
-        # R-02-1: updatedの新しいページは、予算不足でも古いページより先に選ばれる
+        # R-02-1: updatedの新しいページは、予算不足でも古いページより先に選ばれる。
+        #   R-05: ファイル名順では最新ページが最後尾（ZZZ）になるfixtureにして、
+        #   旧ロジック（ファイル名順の先頭詰め）では失敗することを保証する
         for i in range(40):
-            self._page(f"Old{i:02d}", f"旧ページ{i:02d}" + "長" * 20, "要約" * 20,
+            self._page(f"AAAOld{i:02d}", f"旧ページ{i:02d}" + "長" * 20, "要約" * 20,
                        extra="updated: 2020-01-01\n")
-        self._page("New", "最新ページ", "新しい要約", extra="updated: 2026-08-31\n")
+        self._page("ZZZNewest", "最新ページ", "新しい要約", extra="updated: 2026-08-31\n")
         out = llmwiki.build_index_context(self.root, max_chars=2000)
         self.assertIn("最新ページ", out)
         self.assertIn("件を省略", out)  # 古い側は実際に省略されている
 
     def test_missing_updated_treated_as_oldest(self):
-        # R-02-2: updated欠損ページは最古扱い（降順ソートで末尾へ）
-        self._page("Dated", "日付ありページ", "s", extra="updated: 2000-01-01\n")
-        self._page("Undated", "日付なしページ", "s")
+        # R-02-2: updated欠損ページは最古扱い（降順ソートで末尾へ）。
+        #   R-05: ファイル名順では欠損側（AAA）が先になるfixtureにして、
+        #   旧ロジックでは失敗することを保証する
+        self._page("ZZZDated", "日付ありページ", "s", extra="updated: 2000-01-01\n")
+        self._page("AAAUndated", "日付なしページ", "s")
         out = llmwiki.build_index_context(self.root)
         self.assertLess(out.index("日付ありページ"), out.index("日付なしページ"))
 

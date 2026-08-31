@@ -885,7 +885,7 @@ def build_index_context(
 
         def footer_for(omitted: int) -> str:
             return (
-                f"…（表示予算のため、更新が古い{omitted}件を省略。"
+                f"…（表示予算のため残り{omitted}件を省略。"
                 f"全索引: {full_index}）"
             )
 
