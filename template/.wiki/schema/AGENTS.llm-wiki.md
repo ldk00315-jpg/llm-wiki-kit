@@ -186,9 +186,16 @@ injection, not a bug.
 
 Before creating a page, and before making a substantial addition to one:
 
-1. Read the **live files across all of `wiki/`** — filename, `title`, `summary` — and
-   search for the subject. Do not look only in `concepts/`: near-duplicates hide in
-   `syntheses/` and `entities/`, and a page may exist under a different name.
+1. Run the read-only duplicate check first (2026-08-31, Step 2):
+   `python scripts/llmwiki.py resolve --title "<planned title>" --wiki-root <root>/.wiki`
+   (and `search --query "<subject>"` while investigating). It scans the **live
+   files** — title / base title / filename — at query time with similarity
+   ranking, across all sections at once. On `similar` or `duplicate-likely`,
+   Read the named candidates before deciding: the machine only nominates,
+   the merge-or-create judgement stays with the writer. If the CLI is
+   unavailable, fall back to reading the live files across all of `wiki/` —
+   filename, `title`, `summary` — not only `concepts/`: near-duplicates hide
+   in `syntheses/` and `entities/`, and a page may exist under a different name.
 2. Read the candidate page's own scope declaration (see C-3) before assuming it fits.
 3. **Re-check immediately before writing**, not only when you started thinking about it.
 
@@ -197,7 +204,9 @@ whether the index is stale — **the populations differ**. That comparison produ
 false confidence.
 
 Do **not** run a reindex just to make your own judgement easier: that writes a shared
-file before the decision is made, and adds contention where there was none.
+file before the decision is made, and adds contention where there was none. The
+read-only `resolve` / `search` commands scan the live files at query time and
+never touch the index.
 
 ### C-2: Check fit before adding to an existing page
 

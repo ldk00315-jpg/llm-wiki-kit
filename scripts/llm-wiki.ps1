@@ -1,13 +1,15 @@
 ﻿[CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("init", "status", "ingest", "reindex", "lint", "unlock")]
+    [ValidateSet("init", "status", "ingest", "reindex", "lint", "unlock", "search", "resolve")]
     [string]$Command = "status",
 
     [string]$WikiRoot = ".wiki",
     [string]$Source,
     [string]$Text,
     [string]$Title,
+    [string]$Query,
+    [int]$Limit = 0,
     [switch]$Force
 )
 
@@ -62,6 +64,8 @@ $env:LLMWIKI_WIKI_ROOT = $WikiRoot
 if ($Source) { $env:LLMWIKI_SOURCE = $Source } else { Remove-Item Env:LLMWIKI_SOURCE -ErrorAction SilentlyContinue }
 if ($Text)   { $env:LLMWIKI_TEXT = $Text }     else { Remove-Item Env:LLMWIKI_TEXT -ErrorAction SilentlyContinue }
 if ($Title)  { $env:LLMWIKI_TITLE = $Title }   else { Remove-Item Env:LLMWIKI_TITLE -ErrorAction SilentlyContinue }
+if ($Query)  { $env:LLMWIKI_QUERY = $Query }   else { Remove-Item Env:LLMWIKI_QUERY -ErrorAction SilentlyContinue }
+if ($Limit -gt 0) { $env:LLMWIKI_LIMIT = "$Limit" } else { Remove-Item Env:LLMWIKI_LIMIT -ErrorAction SilentlyContinue }
 
 $env:PYTHONIOENCODING = "utf-8"
 # PS 5.1は外部プロセスstdoutを既定でCP932デコードする → UTF-8に切替

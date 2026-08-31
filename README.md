@@ -17,7 +17,8 @@ Andrej Karpathy が提唱した LLM Wiki のアイデア（raw は不変・synth
    作業のときにAIが自分で開く。軽いのに、道具が「感覚」に変わる。
    注入には出力予算（既定8,000字）があり、超える場合は**地図（syntheses）を
    優先し、残りを更新の新しい順**で選ぶ。落ちるのは最近触っていないページで、
-   ページを更新すれば索引へ浮上する（全件一覧は `wiki/_index.md` にある）
+   ページを更新すれば索引へ浮上し、注入ヘッダの**検索入口**（`search` コマンド）
+   からいつでも到達できる（全件一覧は `wiki/_index.md` にある）
 2. **運用契約（スキーマ）** — 何を記録し、何を記録しないか。日常作業の中で
    エージェントが自発的にWikiを育てるルールまで含む
 3. **コンパクション境界の検知と回復リマインダー（＋1行ジャーナル）** —
@@ -188,6 +189,23 @@ Copy-Item -Recurse skills\* <プロジェクト>\.agents\skills
 
 これを貼らない場合、Wikiは `/wiki-ingest` の明示実行でしか育ちません。
 
+## 検索と重複確認（search / resolve）
+
+索引から落ちたページへの到達と、ページ新設前の重複チェックはCLIでできます:
+
+```powershell
+python scripts\llmwiki.py search  --query "ffmpeg 音声" --wiki-root .wiki
+python scripts\llmwiki.py resolve --title "新しいページの題" --wiki-root .wiki
+```
+
+- `search` — title／ファイル名／tags／summary／sources をランク付きで横断検索
+  （日本語は文字単位でそのまま効く・読み取り専用）
+- `resolve` — 新設候補のタイトルを既存全ページと類似度比較し、
+  `duplicate-likely` / `similar` / `none` を判定（スキーマC-1の全表走査の機械化）
+- カタログはDB等の派生物を持たず**クエリ時に実ファイルから構築**（常に新鮮）。
+  実測: 87ページで31ms・合成1,000ページで0.33s。仕様は
+  [`docs/search-resolve-contract.md`](docs/search-resolve-contract.md)
+
 ## Codexで使う
 
 Codex用の `SessionStart` アダプターと `hooks.json` の設定例を同梱しています。
@@ -237,7 +255,9 @@ tests/test_core.py           coreユニットテスト（lock/atomic/F-06/往復
 tests/test_codex_adapter.py  CodexのJSON/BOM/compact/設定契約テスト
 tests/test_skills.py         Skillsの構造契約（共通部分集合・CLI参照）
 tests/test_cross_agent.py    同一fixtureによるClaude Code／Codex契約テスト
+tests/test_search.py         search／resolveの契約テスト（順位・閾値・抑制整合）
 docs/cross-agent-design.md   クロスエージェント設計書（Claude×Codex合意済み）
+docs/search-resolve-contract.md  検索・重複確認の契約（Step 2）
 template/.wiki/              Wikiの雛形（スキーマ＋WALジャーナル＋サンプルページ＋raw実体入り）
 template/.wiki/.obsidian/    Obsidian用の設定済みVault構成（任意・無くても動く）
 ```
