@@ -126,14 +126,71 @@ class TestResolveTitle(SearchVaultCase):
         res = llmwiki.resolve_title(self.root, "信頼ゲートの診断手順")
         self.assertEqual(res["verdict"], "similar")
 
-    def test_novel_topic_is_none(self):
-        # 誤実装対策: 「常にlikely/similar」を返す実装はここで落ちる
+    def test_novel_topic_is_no_lexical_match_not_absence_proof(self):
+        # 誤実装対策: 「常にlikely/similar」を返す実装はここで落ちる。
+        # S2-01: 判定は no-lexical-match（不在証明ではない）で、
+        # 出力は作成許可を断定せず search --query での再確認を促す
         self._page("Gate", "Codexフックの信頼ゲート", "要約")
         self._page("Ffmpeg", "ffmpegラウドネス処理の罠", "要約")
         res = llmwiki.resolve_title(self.root, "量子コンピュータの誤り訂正")
-        self.assertEqual(res["verdict"], "none")
+        self.assertEqual(res["verdict"], "no-lexical-match")
         out = llmwiki.format_resolve_output("量子コンピュータの誤り訂正", res)
-        self.assertIn("新規作成してよい", out)
+        self.assertIn("不在証明ではない", out)
+        self.assertIn("search --query", out)
+        self.assertNotIn("全表走査", out)
+
+    def test_no_lexical_match_with_low_score_candidate_prompts_read(self):
+        # S2-01-4: 閾値未満でも候補が表示される場合はRead確認を促す
+        self._page("Multi", "alpha beta gamma delta", "s")
+        res = llmwiki.resolve_title(self.root, "beta epsilon")
+        self.assertEqual(res["verdict"], "no-lexical-match")
+        self.assertTrue(any(c["similarity"] >= 0.2 for c in res["candidates"]))
+        out = llmwiki.format_resolve_output("beta epsilon", res)
+        self.assertIn("低スコア候補あり", out)
+
+
+class TestFrontmatterBoundary(SearchVaultCase):
+    def test_body_tags_are_not_searchable(self):
+        # S2-02: closing --- より下（本文）の tags:/sources: は照合対象にしない
+        (self.root / "wiki" / "concepts" / "BodyLeak.md").write_text(
+            "---\n"
+            "title: 安全な題\n"
+            "summary: 安全な要約\n"
+            "sources: []\n"
+            "---\n"
+            "\n"
+            "本文\n"
+            "tags: [BODY_ONLY_SECRET]\n"
+            "sources: [BODY_ONLY_SOURCE]\n", encoding="utf-8")
+        self.assertEqual(
+            llmwiki.search_pages(self.root, "BODY_ONLY_SECRET")["total_hits"], 0)
+        self.assertEqual(
+            llmwiki.search_pages(self.root, "BODY_ONLY_SOURCE")["total_hits"], 0)
+
+    def test_untrusted_body_fields_not_searchable(self):
+        # S2-02: untrustedページの本文由来フィールド経由でも検索に出ない
+        (self.root / "wiki" / "concepts" / "ExtLeak.md").write_text(
+            "---\n"
+            "title: 外部由来の題\n"
+            "summary: 概要\n"
+            "trust: untrusted\n"
+            "sources: []\n"
+            "---\n"
+            "\n"
+            "tags: [UNTRUSTED_BODY_SECRET]\n", encoding="utf-8")
+        self.assertEqual(
+            llmwiki.search_pages(self.root, "UNTRUSTED_BODY_SECRET")["total_hits"], 0)
+
+    def test_frontmatter_without_closing_delimiter_reads_nothing(self):
+        # 壊れたfrontmatter（closing---なし）は安全側: リストfieldを読まない
+        (self.root / "wiki" / "concepts" / "Broken.md").write_text(
+            "---\n"
+            "title: 壊れたページ\n"
+            "summary: 概要\n"
+            "tags: [BROKEN_FM_TAG]\n"
+            "sources: []\n", encoding="utf-8")
+        self.assertEqual(
+            llmwiki.search_pages(self.root, "BROKEN_FM_TAG")["total_hits"], 0)
 
 
 class TestSearchEntryInIndex(SearchVaultCase):
@@ -142,6 +199,24 @@ class TestSearchEntryInIndex(SearchVaultCase):
         out = llmwiki.build_index_context(self.root)
         self.assertIn("検索入口", out)
         self.assertIn("resolve --title", out)
+
+    def test_cli_hint_is_quoted_for_paths_with_spaces(self):
+        # S2-03: 空白を含むworkspaceでもコピー実行可能なよう、パスを引用する
+        base = Path(self._tmp.name) / "space root"
+        root = base / ".wiki"
+        (root / "wiki" / "concepts").mkdir(parents=True)
+        (base / "scripts").mkdir(parents=True)
+        (base / "scripts" / "llmwiki.py").write_text("# deployed core\n",
+                                                     encoding="utf-8")
+        (root / "wiki" / "concepts" / "A.md").write_text(
+            "---\ntitle: ページA\nsummary: s\nsources: []\n---\n\nbody\n",
+            encoding="utf-8")
+        out = llmwiki.build_index_context(root)
+        self.assertIn('python "', out)
+        self.assertIn('space root', out)
+        m = [l for l in out.splitlines() if l.startswith("検索入口")]
+        self.assertEqual(len(m), 1)
+        self.assertIn('llmwiki.py" search', m[0])
 
     def test_budget_invariant_still_holds_with_entry_line(self):
         for i in range(60):
@@ -159,6 +234,34 @@ class TestSearchCli(SearchVaultCase):
         self.assertEqual(llmwiki.main(["resolve", "--title", "新しい題"] + rootarg), 0)
         self.assertEqual(llmwiki.main(["search"] + rootarg), 1)
         self.assertEqual(llmwiki.main(["resolve"] + rootarg), 1)
+
+    def test_cli_limit_priority_and_validation(self):
+        # N-01: 明示 --limit ＞ LLMWIKI_LIMIT ＞ 既定10 ／ N-02: 正の整数のみ
+        import contextlib
+        import io as _io
+        import os
+        for i in range(5):
+            self._page(f"P{i}", f"同点ページ{i}", "共通キーワード")
+        rootarg = ["--wiki-root", str(self.root)]
+        os.environ["LLMWIKI_LIMIT"] = "1"
+        try:
+            buf = _io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = llmwiki.main(["search", "--query", "共通キーワード",
+                                   "--limit", "3"] + rootarg)
+            self.assertEqual(rc, 0)
+            self.assertEqual(buf.getvalue().count("- 同点ページ"), 3)
+            buf = _io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = llmwiki.main(["search", "--query", "共通キーワード"] + rootarg)
+            self.assertEqual(rc, 0)
+            self.assertEqual(buf.getvalue().count("- 同点ページ"), 1)
+        finally:
+            del os.environ["LLMWIKI_LIMIT"]
+        self.assertEqual(
+            llmwiki.main(["search", "--query", "x", "--limit", "0"] + rootarg), 1)
+        self.assertEqual(
+            llmwiki.main(["resolve", "--title", "x", "--limit", "-2"] + rootarg), 1)
 
 
 if __name__ == "__main__":

@@ -186,12 +186,16 @@ injection, not a bug.
 
 Before creating a page, and before making a substantial addition to one:
 
-1. Run the read-only duplicate check first (2026-08-31, Step 2):
+1. Run the read-only candidate scan first (2026-08-31, Step 2), **both** commands:
    `python scripts/llmwiki.py resolve --title "<planned title>" --wiki-root <root>/.wiki`
-   (and `search --query "<subject>"` while investigating). It scans the **live
-   files** — title / base title / filename — at query time with similarity
-   ranking, across all sections at once. On `similar` or `duplicate-likely`,
-   Read the named candidates before deciding: the machine only nominates,
+   **and** `search --query "<subject words>"` — with rewordings of the subject,
+   not just the planned title's own words. These are best-effort **lexical**
+   resolvers: they rank candidates, they do not prove absence.
+   `no-lexical-match` means "no similar spelling", not "no page about this" —
+   a page under a different phrasing (paraphrase, EN⇄JA naming) will not be
+   found by resolve alone; that is what the subject search with rewordings
+   covers. On **any** candidate (including low-score ones listed under
+   `no-lexical-match`), Read it before deciding: the machine only nominates,
    the merge-or-create judgement stays with the writer. If the CLI is
    unavailable, fall back to reading the live files across all of `wiki/` —
    filename, `title`, `summary` — not only `concepts/`: near-duplicates hide

@@ -1,7 +1,7 @@
 # search / resolve 契約: ライブカタログと重複確認
 
-- 版: 1.0（**実装済み**）
-- 日付: 2026-08-31
+- 版: 1.1（**実装済み**）
+- 日付: 2026-08-31（v1.1: 同日 S2-01〜S2-03反映——resolveのbest-effort化・frontmatter境界・CLIパス引用）
 - 起案: なな（Claude / Anthropic）
 - 位置づけ: 敵対的設計レビュー（2026-08-31）再設計②「受動注入の限定＋ライブカタログ」の
   検索側の確定契約。所見1（索引のページ飢餓）の恒久解の前半・所見2（C-1のO(N)人力検索）の解
@@ -45,10 +45,13 @@ python llmwiki.py search  --query "<語 [語2 …]>" [--limit N] --wiki-root <ro
 python llmwiki.py resolve --title "<新設したいタイトル案>" --wiki-root <root>
 ```
 
+- `--limit` の優先順位（契約）: 明示 `--limit` ＞ `LLMWIKI_LIMIT` ＞ 既定10。
+  0以下はエラー（終了コード1）
+
 - PowerShell wrapper: `llm-wiki.ps1 search -Query "<語>" [-Limit N]` ／
   `llm-wiki.ps1 resolve -Title "<案>"`（値は環境変数 `LLMWIKI_QUERY` / `LLMWIKI_LIMIT` /
   `LLMWIKI_TITLE` 経由——PS 5.1の引用符問題の回避・従来と同じ方式）
-- 終了コード: 0=正常（該当なしも正常）／1=引数不足
+- 終了コード: 0=正常（該当なしも正常）／1=引数不足・不正な `--limit`
 - 副作用なし（読み取りのみ・lockを取らない）
 
 ## 4. search の契約
@@ -57,6 +60,9 @@ python llmwiki.py resolve --title "<新設したいタイトル案>" --wiki-root
 
 frontmatterの **title / ファイル名（stem）/ tags / summary / sources** の5フィールド。
 本文（body）は照合しない（注入抑制の迂回路にしない・重複判定に不要）。
+tags/sourcesのparserは opening `---`〜closing `---` を切り出した範囲だけを読む
+（S2-02: 本文中の `tags:`/`sources:` 行は照合に漏れない。closing欠損の壊れた
+frontmatterは安全側=リストfieldを読まない。回帰テストで固定）。
 
 空白区切りの各語について、正規化済み部分一致でフィールド重み
 （title 100 / stem 60 / tags 50 / summary 30 / sources 20）を加点し、
@@ -104,14 +110,24 @@ titleとsummaryは索引と同じ `_index_entry_fields` を通る。したがっ
 |---|---|---|
 | ≥ 0.5 | `duplicate-likely` | 新設せず既存ページへの追記・更新を第一候補に |
 | ≥ 0.3 | `similar` | Readで本文確認→統合可否を判断してから作成 |
-| 未満 | `none` | 新規作成してよい（**C-1の全表走査はこの結果で代替できる**） |
+| 未満 | `no-lexical-match` | **不在証明ではない**。`search --query <主題語>`（言い換え含む）でも確認し、低スコア候補が表示されていればReadしてから判断 |
 
 閾値はテストで固定（変更にはテスト更新＝契約変更を伴う）。
+
+### 5-2b. 限界の明記（S2-01・契約）
+
+resolve/searchは全表走査を**候補探索として機械化するbest-effort resolver**であり、
+不在証明ではない。字面bigram/包含率の比較であるため、**意味が同じで字面が異なる
+タイトル（言い換え・英名⇄和名）はfalse negativeになり得る**（実測:
+`CompactionKnowledgeLoss` を「会話要約で理由と失敗経路が消える問題」と言い換えると
+類似度0.10）。候補の意味判断と、検索語を変えた再確認は書き手が担う。
+近似検索の限界を「作成許可」へ変換してはならない——出力文言もこれを断定しない。
 
 ### 5-3. C-1 との関係
 
 resolveは C-1 の「書く前に実ファイルで確認」の**走査部分**を機械化する。
-`none` 以外が出たら、従来どおり該当ページをReadして人間/LLMが最終判断する
+C-1はresolve単独ではなく **resolve＋subject検索（`search --query`・言い換え含む）**
+の併用を要求する（S2-01）。候補が出たら該当ページをReadして人間/LLMが最終判断する
 （機械判定は候補提示まで。統合するかの意味判断は書き手の責務のまま）。
 TOCTOU（確認〜作成の間の並行作成）はresolveでは解けない——Step 3の課題。
 
@@ -124,12 +140,15 @@ TOCTOU（確認〜作成の間の並行作成）はresolveでは解けない—�
 
 ## 7. テストによる契約固定
 
-`tests/test_search.py`（14件）。fixtureはR-05の教訓に従い、素朴な誤実装
-（ファイル名順・recency順・常にnone/常にlikely）では失敗するよう逆向きに配置:
+`tests/test_search.py`（20件）。fixtureはR-05の教訓に従い、素朴な誤実装
+（ファイル名順・recency順・常にmatch/常にno-match）では失敗するよう逆向きに配置:
 
 - 順位性質: title照合 > summary照合／全語ヒット > 部分ヒット（更新日・名前順と逆配置）
 - tags/sources照合・日本語部分一致・決定性・limit
 - 抑制summaryの非照合・非表示（4-3）
-- resolve閾値の両側（duplicate-likely / similar / none / 完全一致=1.0）と括弧書き剥離
-- 検索入口行の存在と予算不変条件の維持
-- CLI終了コード
+- frontmatter境界: 本文中の tags:/sources: が照合に漏れない・untrusted本文経由も不可・
+  closing欠損は安全側（S2-02）
+- resolve閾値の両側（duplicate-likely / similar / no-lexical-match / 完全一致=1.0）と
+  括弧書き剥離・no-lexical-match出力の非断定文言と低スコア候補のRead促し（S2-01）
+- 検索入口行の存在・空白パスの引用（S2-03）・予算不変条件の維持
+- CLI終了コード・--limit優先順位と正整数検証（N-01/N-02）
