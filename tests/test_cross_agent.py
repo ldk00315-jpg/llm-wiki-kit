@@ -112,10 +112,10 @@ class AdapterContractCase(unittest.TestCase):
         )
         for context in contexts:
             self.assertLessEqual(len(context), 8000)
-            self.assertRegex(context, r"残り\d+件を省略")
+            self.assertRegex(context, r"更新が古い\d+件を省略")
             self.assertTrue(context.endswith(llmwiki.CONTEXT_END))
         self.assertEqual(self._rows(contexts[0]), self._rows(contexts[1]))
-        omitted = [re.search(r"残り(\d+)件を省略", context).group(1) for context in contexts]
+        omitted = [re.search(r"更新が古い(\d+)件を省略", context).group(1) for context in contexts]
         self.assertEqual(omitted[0], omitted[1])
 
     def test_compact_recovery_contract_matches_on_both_hosts(self):
@@ -151,7 +151,7 @@ class AdapterContractCase(unittest.TestCase):
                 self.assertEqual(result.stdout, b"")
                 self.assertEqual(result.stderr, b"")
                 journal = (root / "inbox" / "journal.md").read_text(encoding="utf-8")
-                self.assertIn("PreCompact境界（manual）", journal)
+                self.assertIn(f"PreCompact境界（manual / {name}）", journal)
                 self.assertNotIn("CROSS_AGENT_TRANSCRIPT_SECRET", journal)
                 diagnostics = root / "diagnostics" / "hooks.log"
                 if diagnostics.exists():
@@ -160,7 +160,11 @@ class AdapterContractCase(unittest.TestCase):
                         diagnostics.read_text(encoding="utf-8"),
                     )
                 journals.append(re.sub(r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\]", "[STAMP]", journal))
-        self.assertEqual(journals[0], journals[1])
+        normalized = [
+            re.sub(r"（manual / (?:claude|codex)）", "（manual / HOST）", j)
+            for j in journals
+        ]
+        self.assertEqual(normalized[0], normalized[1])
 
     def test_malformed_stdin_is_safe_and_never_adds_debug_to_stdout(self):
         for name, adapter, is_codex in (
@@ -190,7 +194,7 @@ class AdapterContractCase(unittest.TestCase):
                 self.assertEqual(result.stdout, b"")
                 self.assertEqual(result.stderr, b"")
                 journal = (root / "inbox" / "journal.md").read_text(encoding="utf-8")
-                self.assertIn("PreCompact境界（unknown）", journal)
+                self.assertRegex(journal, r"PreCompact境界（unknown / (claude|codex)）")
 
     def test_missing_core_is_silent_but_attempts_sanitized_diagnostics(self):
         for name, source in (

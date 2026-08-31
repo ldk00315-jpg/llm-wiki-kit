@@ -166,7 +166,7 @@ class TestCodexAdapter(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
         self.assertEqual(result.stdout, b"")
         journal = (self.root / "inbox" / "journal.md").read_text(encoding="utf-8")
-        self.assertIn("PreCompact境界（auto）", journal)
+        self.assertIn("PreCompact境界（auto / codex）", journal)
 
 
 if __name__ == "__main__":

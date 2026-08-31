@@ -92,7 +92,7 @@ def main() -> None:
         return
     event = read_stdin_event()
     try:
-        conflict = append_compact_boundary_marker(root, event.get("trigger", "unknown"))
+        conflict = append_compact_boundary_marker(root, event.get("trigger", "unknown"), agent="codex")
     except LockTimeout as exc:
         log_failure(root, f"journal locked, marker skipped: {exc}")
         return

@@ -130,7 +130,7 @@ def main():
     # ホスト固有の判定はここだけ（Claude Code / Codex とも trigger: manual|auto）
     trigger = event.get("trigger", "unknown")
     try:
-        conflict = append_compact_boundary_marker(root, trigger)
+        conflict = append_compact_boundary_marker(root, trigger, agent="claude")
     except LockTimeout as exc:
         # 他のwriterが作業中。マーカーは諦める（本体は即時capture＋WAL）
         log_failure(root, f"journal locked, marker skipped: {exc}")
