@@ -131,6 +131,26 @@ _INJECTION_PATTERNS = [
 ]
 
 
+def _frontmatter_lines(lines: list[str]) -> list[str]:
+    """opening `---` から closing `---` までのfrontmatter行だけを返す。
+
+    S2-02: parserがclosing delimiterを越えて本文を読むと、本文中の
+    `tags:` / `sources:` が検索対象へ漏れる（照合フィールド契約と
+    抑制迂回防止の両方が破れる）。カタログはこの範囲しか見ない。
+    S2-04: 行数上限を設けない。全metadata読み取り（title/summary/trust/updated/
+    tags/sources）はこのhelperの返す同一範囲を使う。
+    """
+    if not lines or lines[0].strip() != "---":
+        return []
+    out: list[str] = []
+    for line in lines[1:]:
+        if line.strip() == "---":
+            return out
+        out.append(line)
+    # closing delimiterが無い（壊れたfrontmatter）→ 安全側: 何も読まない
+    return []
+
+
 def injection_warnings(text: str) -> list[str]:
     """F-06: 命令文らしきパターンの検出（警告のみ・失敗させない）。"""
     return [p.pattern for p in _INJECTION_PATTERNS if p.search(text)]
@@ -769,18 +789,20 @@ def _index_entry_fields(page: Path, root: Path) -> tuple[str, str, str]:
     except (OSError, UnicodeDecodeError):
         return "", "", "", ""
     trust = ""
-    if lines and lines[0].strip() == "---":
-        for line in lines[1:60]:
-            if line.strip() == "---":
-                break
-            if line.startswith("title:"):
-                title = yaml_scalar_decode(line[len("title:"):])
-            elif line.startswith("summary:"):
-                summary = yaml_scalar_decode(line[len("summary:"):])
-            elif line.startswith("trust:"):
-                trust = yaml_scalar_decode(line[len("trust:"):]).strip().lower()
-            elif line.startswith("updated:"):
-                updated = yaml_scalar_decode(line[len("updated:"):]).strip()[:10]
+    # S2-04: 行数上限を設けず、opening〜closing のfrontmatter全域を単一のhelperで
+    # 切り出す（collect_catalogと同一範囲）。隠れ上限は「正しく閉じた長いfrontmatter」で
+    # metadata欠落を起こし、特に trust: untrusted が既定trustedへ倒れるfail-openになる。
+    # closing欠損（壊れたfrontmatter）は _frontmatter_lines が空を返す＝
+    # 何も読まない → title=ファイル名・summaryなし のfail-closedに落ちる。
+    for line in _frontmatter_lines(lines):
+        if line.startswith("title:"):
+            title = yaml_scalar_decode(line[len("title:"):])
+        elif line.startswith("summary:"):
+            summary = yaml_scalar_decode(line[len("summary:"):])
+        elif line.startswith("trust:"):
+            trust = yaml_scalar_decode(line[len("trust:"):]).strip().lower()
+        elif line.startswith("updated:"):
+            updated = yaml_scalar_decode(line[len("updated:"):]).strip()[:10]
 
     title = sanitize_injection_text(_flatten_ws(title or page.stem))
     summary = sanitize_injection_text(_flatten_ws(summary))
@@ -1023,24 +1045,6 @@ def _title_similarity(a: str, b: str) -> float:
     return max(dice, contain)
 
 
-def _frontmatter_lines(lines: list[str]) -> list[str]:
-    """opening `---` から closing `---` までのfrontmatter行だけを返す。
-
-    S2-02: parserがclosing delimiterを越えて本文を読むと、本文中の
-    `tags:` / `sources:` が検索対象へ漏れる（照合フィールド契約と
-    抑制迂回防止の両方が破れる）。カタログはこの範囲しか見ない。
-    """
-    if not lines or lines[0].strip() != "---":
-        return []
-    out: list[str] = []
-    for line in lines[1:]:
-        if line.strip() == "---":
-            return out
-        out.append(line)
-    # closing delimiterが無い（壊れたfrontmatter）→ 安全側: 何も読まない
-    return []
-
-
 def _catalog_list_field(lines: list[str], key: str) -> list[str]:
     """frontmatter行から `key: [a, b]` inline／ブロックリストの双方を読む。
 
@@ -1088,7 +1092,7 @@ def collect_catalog(root: Path) -> list[dict]:
             if not title:
                 continue
             try:
-                raw_lines = page.read_text(encoding="utf-8-sig").splitlines()[:80]
+                raw_lines = page.read_text(encoding="utf-8-sig").splitlines()
             except (OSError, UnicodeDecodeError):
                 raw_lines = []
             fm = _frontmatter_lines(raw_lines)
@@ -1249,15 +1253,15 @@ def main(argv: list[str] | None = None) -> int:
     args.text = args.text or os.environ.get("LLMWIKI_TEXT")
     args.title = args.title or os.environ.get("LLMWIKI_TITLE")
     args.query = args.query or os.environ.get("LLMWIKI_QUERY")
-    # 優先順位（契約）: 明示 --limit ＞ LLMWIKI_LIMIT ＞ 既定10。正の整数のみ受理
+    # 優先順位（契約）: 明示 --limit ＞ LLMWIKI_LIMIT ＞ 既定（search 10／resolve 5）。
+    # 正の整数のみ受理。既定値はコマンドごとに異なるためここでは埋めない（N-03）
     if args.limit is None and os.environ.get("LLMWIKI_LIMIT"):
         try:
             args.limit = int(os.environ["LLMWIKI_LIMIT"])
         except ValueError:
             pass
-    if args.limit is None:
-        args.limit = 10
-    if args.command in ("search", "resolve") and args.limit <= 0:
+    if (args.command in ("search", "resolve")
+            and args.limit is not None and args.limit <= 0):
         print("ERROR: --limit must be a positive integer", file=sys.stderr)
         return 1
 
@@ -1295,14 +1299,17 @@ def main(argv: list[str] | None = None) -> int:
             if not (args.query or "").strip():
                 print("ERROR: search requires --query", file=sys.stderr)
                 return 1
+            limit_kwargs = {} if args.limit is None else {"limit": args.limit}
             print(format_search_output(
-                args.query, search_pages(root, args.query, limit=args.limit)))
+                args.query, search_pages(root, args.query, **limit_kwargs)))
         elif args.command == "resolve":
             assert_wiki_exists(root)
             if not (args.title or "").strip():
                 print("ERROR: resolve requires --title", file=sys.stderr)
                 return 1
-            print(format_resolve_output(args.title, resolve_title(root, args.title)))
+            limit_kwargs = {} if args.limit is None else {"limit": args.limit}
+            print(format_resolve_output(
+                args.title, resolve_title(root, args.title, **limit_kwargs)))
         elif args.command == "lint":
             assert_wiki_exists(root)
             issues, warnings = lint(root)

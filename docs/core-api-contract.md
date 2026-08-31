@@ -114,6 +114,10 @@ frontmatter に任意フィールド `trust` を導入する。
 
 判定はCoreが行い、アダプターは関与しない。**既存の全ページは無指定＝`trusted`** なので移行時の変更はゼロ。
 
+frontmatterは opening `---`〜closing `---` の**全域**を走査する（行数上限なし・
+S2-04）。closing欠損はfail-closed（fieldを読まずtitleはファイル名へ退避）——
+`trust` の読み落としは抑制のfail-openになるため、隠れ上限を持たないことを契約とする。
+
 ### 4-3. WARN該当ページの抑制（要件5）
 
 Core の既存関数 `injection_warnings(summary)` がヒットしたページは、**trust設定にかかわらず要約を注入しない**（タイトルとパスのみ）。

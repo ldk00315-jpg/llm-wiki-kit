@@ -181,9 +181,63 @@ class TestFrontmatterBoundary(SearchVaultCase):
         self.assertEqual(
             llmwiki.search_pages(self.root, "UNTRUSTED_BODY_SECRET")["total_hits"], 0)
 
+    def test_late_closing_frontmatter_fields_are_read(self):
+        # S2-04: closingが80行目より後ろでも、正しく閉じたfrontmatterの
+        # tags/sourcesは検索される（隠れ行数上限を持たない）
+        filler = "".join(f"filler_key_{i:03d}: x\n" for i in range(90))
+        (self.root / "wiki" / "concepts" / "LateClose.md").write_text(
+            "---\n"
+            "title: 遅い閉じのページ\n"
+            "summary: 概要\n"
+            + filler +
+            "tags: [UNIQUEBOUNDARYTOKEN987]\n"
+            "sources: [../../raw/LATE_SOURCE_TOKEN.md]\n"
+            "---\n\nbody\n", encoding="utf-8")
+        self.assertEqual(
+            llmwiki.search_pages(self.root, "UNIQUEBOUNDARYTOKEN987")["total_hits"], 1)
+        self.assertEqual(
+            llmwiki.search_pages(self.root, "LATE_SOURCE_TOKEN")["total_hits"], 1)
+
+    def test_late_trust_untrusted_still_suppresses_summary(self):
+        # S2-04: trust: untrusted が60行目より後ろでもfail-openしない
+        filler = "".join(f"filler_key_{i:03d}: x\n" for i in range(70))
+        (self.root / "wiki" / "concepts" / "LateTrust.md").write_text(
+            "---\n"
+            "title: 遅いtrustのページ\n"
+            "summary: SHOULD_BE_HIDDEN\n"
+            + filler +
+            "trust: untrusted\n"
+            "sources: []\n"
+            "---\n\nbody\n", encoding="utf-8")
+        self.assertEqual(
+            llmwiki.search_pages(self.root, "SHOULD_BE_HIDDEN")["total_hits"], 0)
+        res = llmwiki.search_pages(self.root, "遅いtrust")
+        self.assertEqual(res["total_hits"], 1)
+        self.assertNotIn("SHOULD_BE_HIDDEN",
+                         llmwiki.format_search_output("遅いtrust", res))
+        self.assertNotIn("SHOULD_BE_HIDDEN",
+                         llmwiki.build_index_context(self.root))
+
+    def test_missing_closing_fails_closed_for_summary_too(self):
+        # S2-04: closing欠損はsummary側もfail-closed（title=ファイル名へ退避）
+        # 注: closing欠損時、titleはstem（ファイル名）へ退避し正当な検索対象になる。
+        # 主張は「秘匿値・壊れたfrontmatterの中身経由で見つからない」なので、
+        # stemは秘匿トークンとbigramが重ならない名（Zq）にする
+        (self.root / "wiki" / "concepts" / "Zq.md").write_text(
+            "---\n"
+            "title: 閉じていないページ\n"
+            "summary: UNCLOSED_SECRET_SUMMARY\n"
+            "sources: []\n", encoding="utf-8")
+        self.assertEqual(
+            llmwiki.search_pages(self.root, "UNCLOSED_SECRET_SUMMARY")["total_hits"], 0)
+        out = llmwiki.build_index_context(self.root)
+        self.assertNotIn("UNCLOSED_SECRET_SUMMARY", out)
+        self.assertNotIn("閉じていないページ", out)  # 壊れたfrontmatterのtitleも読まない
+        self.assertIn("- Zq [", out)  # titleはファイル名へ退避
+
     def test_frontmatter_without_closing_delimiter_reads_nothing(self):
         # 壊れたfrontmatter（closing---なし）は安全側: リストfieldを読まない
-        (self.root / "wiki" / "concepts" / "Broken.md").write_text(
+        (self.root / "wiki" / "concepts" / "Xq.md").write_text(
             "---\n"
             "title: 壊れたページ\n"
             "summary: 概要\n"
@@ -262,6 +316,24 @@ class TestSearchCli(SearchVaultCase):
             llmwiki.main(["search", "--query", "x", "--limit", "0"] + rootarg), 1)
         self.assertEqual(
             llmwiki.main(["resolve", "--title", "x", "--limit", "-2"] + rootarg), 1)
+
+    def test_resolve_limit_is_effective(self):
+        # N-03: resolveの--limitが候補数へ実際に反映される（既定は5）
+        import contextlib
+        import io as _io
+        for i in range(7):
+            self._page(f"Sim{i}", f"alpha beta gamma variant {i}", "s")
+        res = llmwiki.resolve_title(self.root, "alpha beta gamma")
+        self.assertEqual(len(res["candidates"]), 5)  # 既定5のまま
+        res1 = llmwiki.resolve_title(self.root, "alpha beta gamma", limit=1)
+        self.assertEqual(len(res1["candidates"]), 1)
+        buf = _io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = llmwiki.main(["resolve", "--title", "alpha beta gamma",
+                               "--limit", "1", "--wiki-root", str(self.root)])
+        self.assertEqual(rc, 0)
+        rows = [l for l in buf.getvalue().splitlines() if l.startswith("- ")]
+        self.assertEqual(len(rows), 1)
 
 
 if __name__ == "__main__":

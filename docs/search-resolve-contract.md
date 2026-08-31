@@ -1,7 +1,7 @@
 # search / resolve 契約: ライブカタログと重複確認
 
-- 版: 1.1（**実装済み**）
-- 日付: 2026-08-31（v1.1: 同日 S2-01〜S2-03反映——resolveのbest-effort化・frontmatter境界・CLIパス引用）
+- 版: 1.2（**実装済み**）
+- 日付: 2026-08-31（v1.1: S2-01〜S2-03反映／v1.2: S2-04 frontmatter隠れ上限の撤廃・N-03 resolve --limit実効化）
 - 起案: なな（Claude / Anthropic）
 - 位置づけ: 敵対的設計レビュー（2026-08-31）再設計②「受動注入の限定＋ライブカタログ」の
   検索側の確定契約。所見1（索引のページ飢餓）の恒久解の前半・所見2（C-1のO(N)人力検索）の解
@@ -45,8 +45,9 @@ python llmwiki.py search  --query "<語 [語2 …]>" [--limit N] --wiki-root <ro
 python llmwiki.py resolve --title "<新設したいタイトル案>" --wiki-root <root>
 ```
 
-- `--limit` の優先順位（契約）: 明示 `--limit` ＞ `LLMWIKI_LIMIT` ＞ 既定10。
-  0以下はエラー（終了コード1）
+- `--limit` の優先順位（契約）: 明示 `--limit` ＞ `LLMWIKI_LIMIT` ＞ 既定
+  （**search 10／resolve 5**）。0以下はエラー（終了コード1）。
+  **searchとresolveの両方で実効**（N-03: resolveで受理して無視しない）
 
 - PowerShell wrapper: `llm-wiki.ps1 search -Query "<語>" [-Limit N]` ／
   `llm-wiki.ps1 resolve -Title "<案>"`（値は環境変数 `LLMWIKI_QUERY` / `LLMWIKI_LIMIT` /
@@ -61,8 +62,15 @@ python llmwiki.py resolve --title "<新設したいタイトル案>" --wiki-root
 frontmatterの **title / ファイル名（stem）/ tags / summary / sources** の5フィールド。
 本文（body）は照合しない（注入抑制の迂回路にしない・重複判定に不要）。
 tags/sourcesのparserは opening `---`〜closing `---` を切り出した範囲だけを読む
-（S2-02: 本文中の `tags:`/`sources:` 行は照合に漏れない。closing欠損の壊れた
-frontmatterは安全側=リストfieldを読まない。回帰テストで固定）。
+（S2-02: 本文中の `tags:`/`sources:` 行は照合に漏れない）。
+
+**frontmatterの読み取りに行数上限を設けない**（S2-04）。全フィールド
+（title/summary/trust/updated/tags/sources）が同一の `_frontmatter_lines` の
+返す範囲を使う。隠れ上限は「正しく閉じた長いfrontmatter」でmetadata欠落を
+起こし、特に `trust: untrusted` が既定trustedへ倒れる**fail-open**になるため
+契約として禁止する。closing欠損（壊れたfrontmatter）は**fail-closed**:
+何も読まず、titleはファイル名（stem）へ退避・summary/tags/sourcesは空
+（秘匿値経由では発見できない。回帰テストで固定）。
 
 空白区切りの各語について、正規化済み部分一致でフィールド重み
 （title 100 / stem 60 / tags 50 / summary 30 / sources 20）を加点し、
@@ -140,15 +148,16 @@ TOCTOU（確認〜作成の間の並行作成）はresolveでは解けない—�
 
 ## 7. テストによる契約固定
 
-`tests/test_search.py`（20件）。fixtureはR-05の教訓に従い、素朴な誤実装
+`tests/test_search.py`（24件）。fixtureはR-05の教訓に従い、素朴な誤実装
 （ファイル名順・recency順・常にmatch/常にno-match）では失敗するよう逆向きに配置:
 
 - 順位性質: title照合 > summary照合／全語ヒット > 部分ヒット（更新日・名前順と逆配置）
 - tags/sources照合・日本語部分一致・決定性・limit
 - 抑制summaryの非照合・非表示（4-3）
 - frontmatter境界: 本文中の tags:/sources: が照合に漏れない・untrusted本文経由も不可・
-  closing欠損は安全側（S2-02）
+  closing欠損は安全側（S2-02）／行数上限なし: closing>80行のtags/sources照合・
+  trust>60行でも抑制・closing欠損はsummaryもfail-closed（S2-04）
 - resolve閾値の両側（duplicate-likely / similar / no-lexical-match / 完全一致=1.0）と
   括弧書き剥離・no-lexical-match出力の非断定文言と低スコア候補のRead促し（S2-01）
 - 検索入口行の存在・空白パスの引用（S2-03）・予算不変条件の維持
-- CLI終了コード・--limit優先順位と正整数検証（N-01/N-02）
+- CLI終了コード・--limit優先順位と正整数検証（N-01/N-02）・resolve --limitの実効（N-03）
