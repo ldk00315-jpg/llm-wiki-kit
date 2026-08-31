@@ -357,6 +357,71 @@ class TestBuildIndexContext(TempVaultCase):
         out = llmwiki.build_index_context(self.root)
         self.assertLess(out.index("地図ページ"), out.index("概念ページ"))
 
+    # --- 選択ロジックの回帰テスト（2026-08-31 R-02: recency-based選択の契約固定）---
+
+    def test_recency_selects_newer_pages_first(self):
+        # R-02-1: updatedの新しいページは、予算不足でも古いページより先に選ばれる
+        for i in range(40):
+            self._page(f"Old{i:02d}", f"旧ページ{i:02d}" + "長" * 20, "要約" * 20,
+                       extra="updated: 2020-01-01\n")
+        self._page("New", "最新ページ", "新しい要約", extra="updated: 2026-08-31\n")
+        out = llmwiki.build_index_context(self.root, max_chars=2000)
+        self.assertIn("最新ページ", out)
+        self.assertIn("件を省略", out)  # 古い側は実際に省略されている
+
+    def test_missing_updated_treated_as_oldest(self):
+        # R-02-2: updated欠損ページは最古扱い（降順ソートで末尾へ）
+        self._page("Dated", "日付ありページ", "s", extra="updated: 2000-01-01\n")
+        self._page("Undated", "日付なしページ", "s")
+        out = llmwiki.build_index_context(self.root)
+        self.assertLess(out.index("日付ありページ"), out.index("日付なしページ"))
+
+    def test_same_day_tie_break_is_deterministic_input_order(self):
+        # R-02-3 / N-01: 同日は既存の決定的入力順
+        #   （concepts→entities→sources の各カテゴリ内ファイル名順・安定ソート）
+        extra = "updated: 2026-01-01\n"
+        self._page("B", "概念ビー", "s", extra=extra)
+        self._page("A", "概念エー", "s", extra=extra)
+        (self.root / "wiki" / "entities").mkdir(parents=True, exist_ok=True)
+        llmwiki.atomic_write_text(self.root / "wiki" / "entities" / "E.md", (
+            "---\ntitle: 実体イー\nsummary: s\nupdated: 2026-01-01\nsources: []\n---\n\nbody\n"
+        ))
+        out = llmwiki.build_index_context(self.root)
+        self.assertLess(out.index("概念エー"), out.index("概念ビー"))
+        self.assertLess(out.index("概念ビー"), out.index("実体イー"))
+        rows = [l for l in out.splitlines() if l.startswith("- ")]
+        rows2 = [l for l in llmwiki.build_index_context(self.root).splitlines()
+                 if l.startswith("- ")]
+        self.assertEqual(rows, rows2)  # 再実行しても同一（決定的）
+
+    def test_syntheses_over_budget_keeps_invariant_not_completeness(self):
+        # R-02-4: syntheses群だけで予算超過しても max_chars は守る。
+        #   このとき後方の地図は落ちる＝「地図は全件」は契約ではない（R-01）
+        (self.root / "wiki" / "syntheses").mkdir(parents=True, exist_ok=True)
+        for i in range(60):
+            llmwiki.atomic_write_text(
+                self.root / "wiki" / "syntheses" / f"S{i:02d}.md",
+                ("---\ntitle: " + f"地図{i:02d}" + "長" * 30
+                 + "\nsummary: " + "要約" * 30 + "\nsources: []\n---\n\nbody\n"))
+        out = llmwiki.build_index_context(self.root, max_chars=2000)
+        self.assertLessEqual(len(out), 2000)
+        self.assertTrue(out.endswith(llmwiki.CONTEXT_END))
+        self.assertIn("件を省略", out)
+        self.assertIn("地図00", out)     # 先頭の地図は残る
+        self.assertNotIn("地図59", out)  # 後方の地図は落ちる
+
+    def test_touching_updated_resurfaces_page(self):
+        # R-02-5: 古いページのupdatedを更新すると注入対象へ浮上する（飢餓解消の核心）
+        for i in range(40):
+            self._page(f"F{i:02d}", f"埋めページ{i:02d}" + "長" * 20, "要約" * 20,
+                       extra="updated: 2024-06-01\n")
+        self._page("Target", "浮上対象ページ", "s", extra="updated: 2020-01-01\n")
+        out = llmwiki.build_index_context(self.root, max_chars=2500)
+        self.assertNotIn("浮上対象ページ", out)
+        self._page("Target", "浮上対象ページ", "s", extra="updated: 2026-08-31\n")
+        out2 = llmwiki.build_index_context(self.root, max_chars=2500)
+        self.assertIn("浮上対象ページ", out2)
+
     def test_summary_truncated(self):
         self._page("Long", "長い要約", "あ" * 400)
         out = llmwiki.build_index_context(self.root)

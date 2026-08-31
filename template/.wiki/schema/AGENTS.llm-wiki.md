@@ -1,6 +1,6 @@
 ---
 title: LLM Wiki Schema
-summary: Operating contract for any agent reading or writing the workspace LLM Wiki at .wiki/. Includes the shared-Vault rules C-1…C-7 that keep multiple writers from diverging.
+summary: Operating contract for any agent reading or writing the workspace LLM Wiki at .wiki/. Includes the shared-Vault rules C-1…C-8 that keep multiple writers from diverging.
 created: 2026-08-05
 updated: 2026-08-19
 ---
@@ -164,7 +164,7 @@ Long sessions get compacted (summarized). Compaction keeps *what was done* and d
 
 When in doubt: if a future agent reading the workspace cold would benefit, it's wiki. If a future agent collaborating with the user would benefit, it's memory.
 
-## Shared-Vault operating rules (C-1 … C-7)
+## Shared-Vault operating rules (C-1 … C-8)
 
 These apply whenever **more than one writer** touches this Vault — two agents, or an
 agent plus a human with an editor. They are derived from a real incident, not theory.
