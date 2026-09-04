@@ -89,9 +89,9 @@ nominated ──decide──▶ held | rejected
 - schema `effect-contract.schema.json`。直交軸を混ぜない:
   - `reversibility ∈ {none, backup_restore, compensating, recreate_from_source}`
   - `idempotency ∈ {idempotent, keyed, non_idempotent, unknown}`
-  - `op ∈ {read, write, replace, delete, notify, human_action}`
-  - write / replace / delete には `backup` と `postcondition` を要求、read には `freshness` / `completeness` 条件を要求（conditional required）
-  - `local_io` / `network` / `credential_locator` は resource 種別に応じた conditional required
+  - `op ∈ {read, create, write, replace, delete, notify, human_action}`。`create` は存在しない path への exclusive create（既存を上書きしない）
+  - write / replace には `backup` と `postcondition`、create には `postcondition`（backup は持たない・idempotency は keyed|idempotent）、delete には `actor / trigger / precondition / postcondition` に加えて `backup` **または** `irreversible_ack: true`（reversibility=none とセット・機密入力の削除など backup が redaction と矛盾する場合）、read には `freshness` / `completeness` を要求（conditional required）
+  - `local_io`（kind / sensitivity / retention / redaction すべて必須・output にも適用）/ `network` / `credential_locator` は resource 種別に応じた conditional required。削除は read の retention 記述に埋めず**独立 effect として宣言**する
 - 未宣言 effect は validation fail、既知でない class は schema error
 
 ## 6. 人間ゲート適用表（D-05・C-08）
