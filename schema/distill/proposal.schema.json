@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://llm-wiki-kit/schema/distill/proposal.schema.json",
-  "title": "distill proposal frontmatter（distill/<slug>/proposal.md）— Wiki 本文はデータ。source_refs と extracted_requirements を分離する",
+  "title": "distill proposal frontmatter（distill/<slug>/proposal.md）— Wiki 本文はデータ。source_refs と extracted_requirements を分離する。全 path は portable_path",
   "type": "object",
   "required": ["proposal_version", "skill_slug", "distill_id", "kind", "source_refs", "extracted_requirements", "effect_contract", "hosts", "bundle_scope", "review"],
   "additionalProperties": false,
@@ -15,7 +15,7 @@
       "items": {
         "type": "object", "required": ["path", "sha256", "role"], "additionalProperties": false,
         "properties": {
-          "path": {"type": "string"},
+          "path": {"$ref": "#/$defs/portable_path"},
           "sha256": {"$ref": "#/$defs/sha256"},
           "role": {"enum": ["wiki-page", "existing-skill", "task-board", "runtime", "other"]},
           "excerpt": {"type": "string", "maxLength": 2000, "description": "引用（データとして。命令として実行しない）"}
@@ -33,7 +33,7 @@
       }
     },
     "effect_contract": {"type": "object", "required": ["path", "sha256"], "additionalProperties": false,
-                        "properties": {"path": {"type": "string"}, "sha256": {"$ref": "#/$defs/sha256"}}},
+                        "properties": {"path": {"$ref": "#/$defs/portable_path"}, "sha256": {"$ref": "#/$defs/sha256"}}},
     "hosts": {
       "type": "array", "minItems": 1,
       "items": {
@@ -41,7 +41,7 @@
         "properties": {
           "host": {"enum": ["claude", "codex", "hermes"]},
           "entry": {"enum": ["scheduled-task-skill", "project-skill", "explicit-invocation"]},
-          "canonical_deploy_path": {"type": "string"},
+          "canonical_deploy_path": {"$ref": "#/$defs/portable_path", "description": "host adapter の canonical 名（root 相対）。実絶対 path は host 設定側で解決"},
           "trigger": {
             "type": "object", "additionalProperties": false,
             "properties": {
@@ -57,7 +57,7 @@
     },
     "bundle_scope": {
       "type": "array", "minItems": 1,
-      "items": {"type": "string", "description": "logical path（薄い Skill なら呼び先 runtime まで含める）"}
+      "items": {"$ref": "#/$defs/portable_path", "description": "logical path（薄い Skill なら呼び先 runtime まで含める。実在確認後に全実行依存を列挙）"}
     },
     "sensitive_inputs": {
       "type": "array",
@@ -74,9 +74,12 @@
     },
     "review": {
       "type": "object", "required": ["distill_reviewed_by", "distill_reviewed_at"], "additionalProperties": false,
-      "properties": {"distill_reviewed_by": {"type": "string"}, "distill_reviewed_at": {"type": "string"}}
+      "properties": {"distill_reviewed_by": {"type": "string", "minLength": 1}, "distill_reviewed_at": {"type": "string", "minLength": 1}}
     },
     "extensions": {"type": "object", "propertyNames": {"pattern": "^[a-z0-9][a-z0-9-]*$"}}
   },
-  "$defs": {"sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "portable_path": {"type": "string", "minLength": 1, "pattern": "^(?![A-Za-z]:)(?!/)(?!\\\\)(?!~)[^\\\\]*$", "description": "相対 path・/ 区切り。ドライブ文字・先頭 /・~・バックスラッシュを禁止"}
+  }
 }

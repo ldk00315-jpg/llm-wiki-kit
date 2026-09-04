@@ -31,6 +31,7 @@
     "extensions": {"type": "object", "propertyNames": {"pattern": "^[a-z0-9][a-z0-9-]*$"}}
   },
   "$defs": {
+    "portable_path": {"type": "string", "minLength": 1, "pattern": "^(?![A-Za-z]:)(?!/)(?!\\\\)(?!~)[^\\\\]*$", "description": "相対 path・/ 区切り。ドライブ文字・先頭 /・~・バックスラッシュを禁止"},
     "effect": {
       "type": "object",
       "required": ["id", "resource", "target", "op", "reversibility", "idempotency", "human_action"],
@@ -82,6 +83,9 @@
         {"if": {"properties": {"op": {"const": "read"}}}, "then": {"required": ["freshness", "completeness"]}},
         {"if": {"properties": {"resource": {"enum": ["external-api", "external-document"]}}}, "then": {"required": ["network", "credential_locator"]}},
         {"if": {"properties": {"resource": {"enum": ["local-file", "secret-file"]}}}, "then": {"required": ["local_io"]}},
+        {"$comment": "path/locator として使う target は portable_path（絶対 path・~・バックスラッシュ禁止）。外部 resource/notification/human の target は自由文字列",
+         "if": {"properties": {"resource": {"enum": ["local-file", "local-db", "secret-file", "host-config"]}}},
+         "then": {"properties": {"target": {"$ref": "#/$defs/portable_path"}}}},
         {"if": {"properties": {"op": {"const": "human_action"}}}, "then": {"properties": {"human_action": {"const": "required"}, "resource": {"const": "human"}}}},
         {"if": {"properties": {"op": {"const": "notify"}}}, "then": {"properties": {"resource": {"const": "notification"}, "idempotency": {"enum": ["keyed", "idempotent"]}}}}
       ]

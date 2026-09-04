@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://llm-wiki-kit/schema/distill/distill-event.schema.json",
-  "title": "distill event — 1 event 1 immutable file (.wiki/distill/events/<event_id>.json)。type別の必須fieldは allOf/if/then で閉じる",
+  "title": "distill event — 1 event 1 immutable file (.wiki/distill/events/<event_id>.json)。type別の source/subject/必須 field/禁止 field を allOf/if/then で閉じる（discriminated union 相当）",
   "type": "object",
   "required": ["event_id", "occurred_at", "event_type", "subject", "source", "strength", "actor"],
   "properties": {
-    "event_id": {"type": "string", "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$"},
-    "occurred_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "event_id": {"$ref": "#/$defs/event_id"},
+    "occurred_at": {"$ref": "#/$defs/utc"},
     "event_type": {"enum": ["registered", "observed", "nominated", "decision", "opportunity", "invoked", "completed", "blocked"]},
     "subject": {
       "type": "object",
@@ -15,11 +15,19 @@
       "properties": {
         "subject_type": {"enum": ["page", "task", "skill"]},
         "distill_id": {"type": "string", "pattern": "^d-[0-9a-f]{8}$"},
-        "page_path": {"type": "string", "minLength": 1},
+        "page_path": {"$ref": "#/$defs/portable_path"},
         "page_sha256": {"$ref": "#/$defs/sha256"},
         "task_id": {"type": "string", "minLength": 1},
         "skill_slug": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"}
-      }
+      },
+      "allOf": [
+        {"if": {"properties": {"subject_type": {"const": "page"}}, "required": ["subject_type"]},
+         "then": {"required": ["distill_id", "page_path", "page_sha256"], "not": {"anyOf": [{"required": ["task_id"]}, {"required": ["skill_slug"]}]}}},
+        {"if": {"properties": {"subject_type": {"const": "task"}}, "required": ["subject_type"]},
+         "then": {"required": ["task_id"], "not": {"anyOf": [{"required": ["distill_id"]}, {"required": ["page_path"]}, {"required": ["page_sha256"]}, {"required": ["skill_slug"]}]}}},
+        {"if": {"properties": {"subject_type": {"const": "skill"}}, "required": ["subject_type"]},
+         "then": {"required": ["skill_slug"], "not": {"anyOf": [{"required": ["task_id"]}, {"required": ["page_path"]}, {"required": ["page_sha256"]}]}}}
+      ]
     },
     "source": {"enum": ["host-task", "agent-self-report", "human", "system"]},
     "strength": {"enum": ["observed", "asserted", "unverifiable"]},
@@ -40,96 +48,100 @@
       },
       "allOf": [
         {"if": {"properties": {"task_metadata_status": {"const": "snapshot"}}},
-         "then": {"required": ["task_metadata"], "not": {"required": ["unverifiable_reason"]}}},
+         "then": {"required": ["task_metadata"], "not": {"anyOf": [{"required": ["unverifiable_reason"]}, {"required": ["partial_task_metadata"]}]}}},
         {"if": {"properties": {"task_metadata_status": {"const": "unverifiable"}}},
          "then": {"required": ["unverifiable_reason"], "not": {"required": ["task_metadata"]}}}
       ]
     },
     "block_kind": {"enum": ["input_missing", "precondition_failed", "permission_pending", "external_unavailable", "operator_cancelled"]},
-    "previous_event_id": {"type": "string", "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$"},
+    "previous_event_id": {"$ref": "#/$defs/event_id"},
     "previous_event_sha256": {"$ref": "#/$defs/sha256"},
     "expected_previous_state": {"enum": ["absent", "observed", "nominated", "held", "rejected", "accepted"]},
     "new_state": {"enum": ["observed", "nominated", "held", "rejected", "accepted"]},
     "threshold": {
       "type": "object", "required": ["window_days", "min_opportunities", "counted_event_ids"], "additionalProperties": false,
       "properties": {"window_days": {"type": "integer", "minimum": 1}, "min_opportunities": {"type": "integer", "minimum": 1},
-                     "counted_event_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}}}
+                     "counted_event_ids": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/event_id"}}}
     },
     "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence_ref"}}
   },
   "allOf": [
     {
-      "$comment": "registered: identity registration の非state event（distill_id の付与）。state field を持たない",
+      "$comment": "registered: identity 登録の非 state event。page のみ・human のみ。state/opportunity/trigger/threshold/block を持たない",
       "if": {"properties": {"event_type": {"const": "registered"}}},
       "then": {"required": ["reason"],
                "properties": {"source": {"const": "human"}, "strength": {"const": "observed"},
-                              "subject": {"required": ["distill_id", "page_path", "page_sha256"]}},
-               "not": {"anyOf": [{"required": ["expected_previous_state"]}, {"required": ["new_state"]}, {"required": ["opportunity_id"]}]}}
+                              "subject": {"properties": {"subject_type": {"const": "page"}}}},
+               "not": {"anyOf": [{"required": ["expected_previous_state"]}, {"required": ["new_state"]}, {"required": ["opportunity_id"]},
+                                 {"required": ["trigger"]}, {"required": ["threshold"]}, {"required": ["block_kind"]},
+                                 {"required": ["previous_event_id"]}, {"required": ["previous_event_sha256"]}]}}
     },
     {
-      "$comment": "observed: 自動閾値到達（system）。absent → observed のみ",
+      "$comment": "observed: 自動閾値到達（system）。absent → observed のみ。previous を持たない",
       "if": {"properties": {"event_type": {"const": "observed"}}},
       "then": {"required": ["threshold", "expected_previous_state", "new_state"],
                "properties": {"source": {"const": "system"}, "strength": {"const": "observed"},
-                              "expected_previous_state": {"const": "absent"}, "new_state": {"const": "observed"}}}
+                              "expected_previous_state": {"const": "absent"}, "new_state": {"const": "observed"}},
+               "not": {"anyOf": [{"required": ["opportunity_id"]}, {"required": ["trigger"]}, {"required": ["block_kind"]},
+                                 {"required": ["previous_event_id"]}, {"required": ["previous_event_sha256"]}]}}
     },
     {
-      "$comment": "nominated: absent|observed|held → nominated（人）。absent 以外は previous event を束縛",
+      "$comment": "nominated: absent|observed|held → nominated（人）。absent は previous 両方禁止、observed|held は両方必須",
       "if": {"properties": {"event_type": {"const": "nominated"}}},
       "then": {"required": ["reason", "expected_previous_state", "new_state"],
                "properties": {"source": {"const": "human"}, "strength": {"const": "observed"},
                               "expected_previous_state": {"enum": ["absent", "observed", "held"]}, "new_state": {"const": "nominated"}},
-               "anyOf": [
-                 {"properties": {"expected_previous_state": {"const": "absent"}}},
-                 {"required": ["previous_event_id", "previous_event_sha256"]}
+               "not": {"anyOf": [{"required": ["opportunity_id"]}, {"required": ["trigger"]}, {"required": ["threshold"]}, {"required": ["block_kind"]}]},
+               "allOf": [
+                 {"if": {"properties": {"expected_previous_state": {"const": "absent"}}},
+                  "then": {"not": {"anyOf": [{"required": ["previous_event_id"]}, {"required": ["previous_event_sha256"]}]}},
+                  "else": {"required": ["previous_event_id", "previous_event_sha256"]}}
                ]}
     },
     {
-      "$comment": "decision: nominated → held|rejected|accepted（人）。必ず previous event を束縛",
+      "$comment": "decision: nominated → held|rejected|accepted（人）。previous 両方必須",
       "if": {"properties": {"event_type": {"const": "decision"}}},
       "then": {"required": ["reason", "expected_previous_state", "new_state", "previous_event_id", "previous_event_sha256"],
                "properties": {"source": {"const": "human"}, "strength": {"const": "observed"},
-                              "expected_previous_state": {"const": "nominated"}, "new_state": {"enum": ["held", "rejected", "accepted"]}}}
+                              "expected_previous_state": {"const": "nominated"}, "new_state": {"enum": ["held", "rejected", "accepted"]}},
+               "not": {"anyOf": [{"required": ["opportunity_id"]}, {"required": ["trigger"]}, {"required": ["threshold"]}, {"required": ["block_kind"]}]}}
     },
     {
+      "$comment": "opportunity: source は host-task|agent-self-report|human（system 不可）。state/previous/threshold/block を持たない",
       "if": {"properties": {"event_type": {"const": "opportunity"}}},
       "then": {"required": ["opportunity_id", "trigger"],
-               "not": {"anyOf": [{"required": ["expected_previous_state"]}, {"required": ["new_state"]}]}}
+               "properties": {"source": {"enum": ["host-task", "agent-self-report", "human"]}},
+               "not": {"anyOf": [{"required": ["expected_previous_state"]}, {"required": ["new_state"]}, {"required": ["threshold"]},
+                                 {"required": ["block_kind"]}, {"required": ["previous_event_id"]}, {"required": ["previous_event_sha256"]}]}}
     },
     {
-      "if": {"properties": {"event_type": {"enum": ["invoked", "completed", "blocked"]}}},
-      "then": {"required": ["opportunity_id"],
-               "not": {"anyOf": [{"required": ["expected_previous_state"]}, {"required": ["new_state"]}]}}
-    },
-    {
-      "if": {"properties": {"event_type": {"const": "blocked"}}},
-      "then": {"required": ["block_kind"]}
-    },
-    {
+      "$comment": "invoked/completed: opportunity_id 必須。system 不可。state/previous/trigger/threshold/block を持たない",
       "if": {"properties": {"event_type": {"enum": ["invoked", "completed"]}}},
-      "then": {"not": {"required": ["block_kind"]}}
+      "then": {"required": ["opportunity_id"],
+               "properties": {"source": {"enum": ["host-task", "agent-self-report", "human"]}},
+               "not": {"anyOf": [{"required": ["expected_previous_state"]}, {"required": ["new_state"]}, {"required": ["trigger"]}, {"required": ["threshold"]},
+                                 {"required": ["block_kind"]}, {"required": ["previous_event_id"]}, {"required": ["previous_event_sha256"]}]}}
     },
     {
-      "if": {"properties": {"subject": {"properties": {"subject_type": {"const": "page"}}, "required": ["subject_type"]}}},
-      "then": {"properties": {"subject": {"required": ["distill_id", "page_path", "page_sha256"]}}}
-    },
-    {
-      "if": {"properties": {"subject": {"properties": {"subject_type": {"const": "task"}}, "required": ["subject_type"]}}},
-      "then": {"properties": {"subject": {"required": ["task_id"]}}}
-    },
-    {
-      "if": {"properties": {"subject": {"properties": {"subject_type": {"const": "skill"}}, "required": ["subject_type"]}}},
-      "then": {"properties": {"subject": {"required": ["skill_slug"]}}}
+      "$comment": "blocked: opportunity_id と block_kind 必須。system 不可",
+      "if": {"properties": {"event_type": {"const": "blocked"}}},
+      "then": {"required": ["opportunity_id", "block_kind"],
+               "properties": {"source": {"enum": ["host-task", "agent-self-report", "human"]}},
+               "not": {"anyOf": [{"required": ["expected_previous_state"]}, {"required": ["new_state"]}, {"required": ["trigger"]}, {"required": ["threshold"]},
+                                 {"required": ["previous_event_id"]}, {"required": ["previous_event_sha256"]}]}}
     }
   ],
   "additionalProperties": false,
   "$defs": {
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "utc": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "event_id": {"type": "string", "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$"},
+    "portable_path": {"type": "string", "minLength": 1, "pattern": "^(?![A-Za-z]:)(?!/)(?!\\\\)(?!~)[^\\\\]*$", "description": "相対 path・/ 区切り。ドライブ文字・先頭 /・~・バックスラッシュを禁止"},
     "evidence_ref": {
       "type": "object",
       "required": ["path", "sha256"],
       "additionalProperties": false,
-      "properties": {"path": {"type": "string"}, "sha256": {"$ref": "#/$defs/sha256"}}
+      "properties": {"path": {"$ref": "#/$defs/portable_path"}, "sha256": {"$ref": "#/$defs/sha256"}}
     }
   }
 }

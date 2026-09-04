@@ -41,7 +41,9 @@ fixture では案2で、script の hash 改変が `check` の drift として検
 | e04 | local-file | **create** | 突合 report を run 別 path へ **exclusive create**（既存を上書きしない。`reversibility: recreate_from_source`・`idempotency: keyed`・`postcondition`: 件数と schema）。**output も機密**: `local_io {kind: output, sensitivity: high, retention: 90日・削除主体は e07, redaction: tracked evidence には report の sha256 と件数のみ・ItemID/タイトル/価格は残さない}` |
 | e05 | notification | notify | とんすけへの結果通知（`idempotency: keyed`・重複通知を dedupe key で防ぐ） |
 | e06 | local-file | **delete** | 入力 CSV の retention enforcement。`actor: skill`・`trigger: 次回 run の prepare 時（completed 済みの前回 input）または blocked のまま 30 日経過`・`precondition: 対象 run の terminal が completed または blocked≥30日、かつ report が存在`・`reversibility: none`＋`irreversible_ack: true`（機密入力は backup しない＝redaction と整合）・`postcondition: 対象 path 不在・削除 event を record に記録`・対象 glob `runs/<run_id>/input/*.csv` |
-| e07 | local-file | **delete** | report の retention enforcement（90日）。`actor: skill`・`trigger: prepare 時`・`precondition: created+90日`・`reversibility: recreate_from_source`（同月 CSV が無ければ実質不可逆→`irreversible_ack: true`）・`postcondition: 対象 path 不在・削除 event` |
+| e07 | local-file | **delete** | report の retention enforcement（90日）。`actor: skill`・`trigger: prepare 時`・`precondition: created+90日`・**`reversibility: none`＋`irreversible_ack: true`**（90日時点では同月の入力 CSV は e06 で消えており再生成できないため、正直に不可逆として宣言する。backup は取らない＝機密 output の redaction と整合）・`postcondition: 対象 path 不在・削除 event` |
+
+e01〜e07 は `tests/test_distill_schemas.py` の **1件の contract instance**として validate される（fixture 本文と test data の対応は test 内のコメントで固定。未検査 effect を残さない）。
 
 external write なし。`concurrency.lock: pipeline-wide`。削除は独立 effect（e06/e07）として宣言し、read (e02) の retention 記述はそれを参照する。
 

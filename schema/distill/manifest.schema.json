@@ -17,7 +17,7 @@
     "common_runtime_sha256": {"$ref": "#/$defs/sha256"},
     "candidate_bundles": {
       "type": "object", "required": ["logical_paths"],
-      "properties": {"logical_paths": {"type": "array", "items": {"type": "string"}}},
+      "properties": {"logical_paths": {"type": "array", "items": {"$ref": "#/$defs/portable_path"}}},
       "additionalProperties": {"$ref": "#/$defs/sha256"}
     },
     "deployed_bundles": {
@@ -30,7 +30,7 @@
           "deployed_at": {"$ref": "#/$defs/utc"},
           "files": {"type": "array", "minItems": 1, "items": {
             "type": "object", "required": ["logical_path", "deployed_path", "sha256"], "additionalProperties": false,
-            "properties": {"logical_path": {"type": "string"}, "deployed_path": {"$ref": "#/$defs/portable_path"}, "sha256": {"$ref": "#/$defs/sha256"}}
+            "properties": {"logical_path": {"$ref": "#/$defs/portable_path"}, "deployed_path": {"$ref": "#/$defs/portable_path"}, "sha256": {"$ref": "#/$defs/sha256"}}
           }}
         }
       }
