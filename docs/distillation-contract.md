@@ -134,4 +134,4 @@ Wiki ref / runtime ref / candidate tree の drift は manifest state を書き�
 
 - hash は SHA-256 hex 64桁。bundle hash は `logical_path\0sha256` を logical path 昇順で `\n` 連結した文字列の SHA-256（pilot と同一）
 - 時刻は UTC `YYYY-MM-DDTHH:MM:SSZ`。ID の乱数部は `secrets.token_hex(4)`
-- path は Vault / repo 相対・`/` 区切り。環境固有の絶対 path を record に書かない。manifest の `wiki_refs` は絶対 path の代わりに **portable な `base_id`**（例 `vault`）を持ち、実 path への解決は host 設定側で行う。schema は `portable_path`（ドライブ文字・先頭 `/`・`~`・バックスラッシュに加え、segment 単位の `.`・`..`・空 segment（`//`・末尾 `/`）・制御文字を禁止。`<run_id>` のような placeholder・日本語・空白は許す）で機械的に拒否し、base 配下の containment は resolver（§10）が再検査する
+- path は Vault / repo 相対・`/` 区切り。環境固有の絶対 path を record に書かない。manifest の `wiki_refs` は絶対 path の代わりに **portable な `base_id`**（例 `vault`）を持ち、実 path への解決は host 設定側で行う。schema は `portable_path`（ドライブ文字・先頭 `/`・`~`・バックスラッシュに加え、segment 単位の `.`・`..`・空 segment（`//`・末尾 `/`）・制御文字（C0 U+0000–U+001F・DEL U+007F・C1 U+0080–U+009F＝Unicode Cc 全域）を禁止。`<run_id>` のような placeholder・日本語・空白は許す）で機械的に拒否し、base 配下の containment は resolver（§10）が再検査する

@@ -15,7 +15,8 @@ SHA = "a" * 64
 UTC = "2026-09-04T09:00:00Z"
 EID = "20260904T080000Z-0badcafe"
 BAD_PATHS = ("C:/x/y.md", "/abs/y.md", "~/y.md", "a\\b.md", "",
-             "../outside", "../../secret", "a/../../x", "./x", "a/./x", "a//b", "a/", ".", "..", "a\x01b")
+             "../outside", "../../secret", "a/../../x", "./x", "a/./x", "a//b", "a/", ".", "..",
+             "a\x01b", "a\x7fb", "a\x85b", "a\x9fb")  # C0 / DEL / C1（NEL 含む）制御文字
 GOOD_PATHS = ("a/b.md", "runs/<run_id>/report.json", "scheduled-tasks/x/SKILL.md", "日本語/空白 あり.md")
 
 
