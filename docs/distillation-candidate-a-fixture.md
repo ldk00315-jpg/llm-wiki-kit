@@ -38,10 +38,12 @@ fixture では案2で、script の hash 改変が `check` の drift として検
 | e01 | human | human_action | Seller Hub から Active Listings CSV を人が取得して所定 path へ置く（`human_action: required`）。未着は `blocked(input_missing)` |
 | e02 | local-file | read | 機密 CSV（sensitivity high）。`freshness`: mtime が当月・`completeness`: 行数>0 と必須列。`retention`: 突合完了後 N 日で削除（削除主体: Skill 本体・evidence には行数と hash のみ）。`redaction`: ItemID は evidence に残さず hash 化、価格・タイトルは残さない |
 | e03 | local-db | read | OpenLister DB（read-only）。`freshness`: 取得時刻・`completeness`: active 件数 |
-| e04 | local-file | write | 突合 report（`replace` ではなく run 別 path へ `write`・`reversibility: recreate_from_source`・`idempotency: keyed`・backup 不要だが `postcondition`: 件数と schema） |
+| e04 | local-file | **create** | 突合 report を run 別 path へ **exclusive create**（既存を上書きしない。`reversibility: recreate_from_source`・`idempotency: keyed`・`postcondition`: 件数と schema）。**output も機密**: `local_io {kind: output, sensitivity: high, retention: 90日・削除主体は e07, redaction: tracked evidence には report の sha256 と件数のみ・ItemID/タイトル/価格は残さない}` |
 | e05 | notification | notify | とんすけへの結果通知（`idempotency: keyed`・重複通知を dedupe key で防ぐ） |
+| e06 | local-file | **delete** | 入力 CSV の retention enforcement。`actor: skill`・`trigger: 次回 run の prepare 時（completed 済みの前回 input）または blocked のまま 30 日経過`・`precondition: 対象 run の terminal が completed または blocked≥30日、かつ report が存在`・`reversibility: none`＋`irreversible_ack: true`（機密入力は backup しない＝redaction と整合）・`postcondition: 対象 path 不在・削除 event を record に記録`・対象 glob `runs/<run_id>/input/*.csv` |
+| e07 | local-file | **delete** | report の retention enforcement（90日）。`actor: skill`・`trigger: prepare 時`・`precondition: created+90日`・`reversibility: recreate_from_source`（同月 CSV が無ければ実質不可逆→`irreversible_ack: true`）・`postcondition: 対象 path 不在・削除 event` |
 
-external write なし。`concurrency.lock: pipeline-wide`。
+external write なし。`concurrency.lock: pipeline-wide`。削除は独立 effect（e06/e07）として宣言し、read (e02) の retention 記述はそれを参照する。
 
 ## 5. 人間入力待ちの状態遷移（host-neutral fixture）
 
@@ -60,6 +62,6 @@ opportunity(scheduled 発火・先記録) → invoked
 ## 7. 機密 CSV の retention / redaction（具体）
 
 - 保存: `runs/<run_id>/input/active-listings.csv`（gitignore・ACL は人が設定）
-- 削除主体: 突合完了（completed）後、次回 run の prepare 時に前回 run の input を削除（削除 event を record に残す）。blocked のまま放置された input は 30 日で削除
+- 削除主体: **Skill 本体（effect e06）**。突合完了（completed）後、次回 run の prepare 時に前回 run の input を削除（削除 event を record に残す）。blocked のまま放置された input は 30 日で削除。backup は取らない（`irreversible_ack: true`・redaction と整合）
 - evidence に残してよい: 行数・列名・sha256・取得日。残さない: ItemID（hash 化のみ）・タイトル・価格・数量
-- report: 突合結果は ItemID を含む（人が読む用）が、tracked evidence には report の hash と件数のみ
+- report（e04 output）: 突合結果は ItemID を含む（人が読む用）ため **output も sensitivity high**。retention 90日（effect e07 が削除）。tracked evidence には report の sha256 と件数のみ。入力だけを機密扱いして output を無期限に残す抜け道を作らない

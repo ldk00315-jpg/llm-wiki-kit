@@ -13,8 +13,8 @@
       "required": ["declared_by", "declared_at", "guarantee_ceiling"],
       "additionalProperties": false,
       "properties": {
-        "declared_by": {"type": "string"},
-        "declared_at": {"type": "string"},
+        "declared_by": {"type": "string", "minLength": 1},
+        "declared_at": {"type": "string", "minLength": 1},
         "guarantee_ceiling": {"const": "review+probe+sandbox: undeclared effects found there fail validation; no runtime deny claimed"}
       }
     },
@@ -38,41 +38,52 @@
       "properties": {
         "id": {"type": "string", "pattern": "^e[0-9]{2,3}$"},
         "resource": {"enum": ["external-api", "external-document", "local-file", "local-db", "secret-file", "host-config", "notification", "human"]},
-        "target": {"type": "string", "description": "何を（spreadsheet ID・path glob・DB名・endpoint）。secret の値は書かない（locator のみ）"},
-        "op": {"enum": ["read", "write", "replace", "delete", "notify", "human_action"]},
+        "target": {"type": "string", "minLength": 1, "description": "何を（spreadsheet ID・path glob・DB名・endpoint）。secret の値は書かない（locator のみ）"},
+        "op": {"enum": ["read", "create", "write", "replace", "delete", "notify", "human_action"],
+               "description": "create = 存在しない path への exclusive create（既存を上書きしない）。write/replace = 既存を変える。delete = 除去"},
         "reversibility": {"enum": ["none", "backup_restore", "compensating", "recreate_from_source"]},
         "idempotency": {"enum": ["idempotent", "keyed", "non_idempotent", "unknown"]},
         "human_action": {"enum": ["required", "none"]},
-        "credential_locator": {"type": "string", "description": "file 名や env 名。値は書かない"},
+        "actor": {"enum": ["skill", "human", "host"], "description": "誰が実行するか（delete の主体など）"},
+        "trigger": {"type": "string", "description": "いつ（例: 次回 run の prepare 時／completed 後 N 日）"},
+        "precondition": {"type": "string", "minLength": 1},
+        "credential_locator": {"type": "string", "minLength": 1, "description": "file 名や env 名。値は書かない"},
         "network": {
-          "type": "object", "additionalProperties": false,
-          "properties": {"endpoint": {"type": "string"}, "direction": {"enum": ["read", "write", "both"]}}
+          "type": "object", "additionalProperties": false, "required": ["endpoint", "direction"],
+          "properties": {"endpoint": {"type": "string", "minLength": 1}, "direction": {"enum": ["read", "write", "both"]}}
         },
         "local_io": {
           "type": "object", "additionalProperties": false,
-          "required": ["kind", "sensitivity"],
+          "required": ["kind", "sensitivity", "retention", "redaction"],
           "properties": {
             "kind": {"enum": ["input", "output", "both"]},
             "sensitivity": {"enum": ["low", "medium", "high"]},
-            "retention": {"type": "string", "description": "保存期間と削除主体"},
-            "redaction": {"type": "string", "description": "evidence に残してよい field / 残さない field（ID 等）"}
+            "retention": {"type": "string", "minLength": 1, "description": "保存期間と削除主体（削除は独立 effect として宣言）"},
+            "redaction": {"type": "string", "minLength": 1, "description": "evidence に残してよい field / 残さない field（ID 等）"}
           }
         },
         "backup": {
           "type": "object", "additionalProperties": false,
-          "required": ["method", "taken_before_write"],
-          "properties": {"method": {"type": "string"}, "taken_before_write": {"const": true}, "scope": {"type": "string"}}
+          "required": ["method", "taken_before_write", "scope"],
+          "properties": {"method": {"type": "string", "minLength": 1}, "taken_before_write": {"const": true}, "scope": {"type": "string", "minLength": 1}}
         },
-        "postcondition": {"type": "string", "description": "mutation set 以上を比較する条件（values・書式・順序…）"},
-        "freshness": {"type": "string", "description": "read: 取得物の新しさの条件（mtime・period）"},
-        "completeness": {"type": "string", "description": "read: 取得物の完全性の条件（件数・schema）"}
+        "irreversible_ack": {"const": true, "description": "delete で backup を取らない場合の明示承認（reversibility=none とセット）"},
+        "postcondition": {"type": "string", "minLength": 1, "description": "mutation set 以上を比較する条件（values・書式・順序…）"},
+        "freshness": {"type": "string", "minLength": 1, "description": "read: 取得物の新しさの条件（mtime・period）"},
+        "completeness": {"type": "string", "minLength": 1, "description": "read: 取得物の完全性の条件（件数・schema）"}
       },
       "allOf": [
-        {"if": {"properties": {"op": {"enum": ["write", "replace", "delete"]}}}, "then": {"required": ["backup", "postcondition"]}},
+        {"if": {"properties": {"op": {"enum": ["write", "replace"]}}}, "then": {"required": ["backup", "postcondition"]}},
+        {"if": {"properties": {"op": {"const": "create"}}},
+         "then": {"required": ["postcondition"], "properties": {"idempotency": {"enum": ["keyed", "idempotent"]}}, "not": {"required": ["backup"]}}},
+        {"if": {"properties": {"op": {"const": "delete"}}},
+         "then": {"required": ["actor", "trigger", "precondition", "postcondition"],
+                  "anyOf": [{"required": ["backup"]}, {"required": ["irreversible_ack"], "properties": {"reversibility": {"const": "none"}}}]}},
         {"if": {"properties": {"op": {"const": "read"}}}, "then": {"required": ["freshness", "completeness"]}},
         {"if": {"properties": {"resource": {"enum": ["external-api", "external-document"]}}}, "then": {"required": ["network", "credential_locator"]}},
         {"if": {"properties": {"resource": {"enum": ["local-file", "secret-file"]}}}, "then": {"required": ["local_io"]}},
-        {"if": {"properties": {"op": {"const": "human_action"}}}, "then": {"properties": {"human_action": {"const": "required"}, "resource": {"const": "human"}}}}
+        {"if": {"properties": {"op": {"const": "human_action"}}}, "then": {"properties": {"human_action": {"const": "required"}, "resource": {"const": "human"}}}},
+        {"if": {"properties": {"op": {"const": "notify"}}}, "then": {"properties": {"resource": {"const": "notification"}, "idempotency": {"enum": ["keyed", "idempotent"]}}}}
       ]
     }
   }

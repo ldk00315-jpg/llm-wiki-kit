@@ -35,12 +35,28 @@ Wikiに蓄積された**手順型の知**を、人の指名を起点に、検証
 ## 3. event（D-01・C-04・C-05・C-07）
 
 - 置き場 `.wiki/distill/events/<event_id>.json`。**1 event 1 file・exclusive create・更新禁止**。`event_id = <UTC yyyymmddTHHMMSSZ>-<8hex>`。衝突時は乱数を引き直して最大3回まで再試行し、超えたら失敗を返す
-- schema は `distill-event.schema.json`（event type 別 `oneOf`）:
-  - **lifecycle**（`nominated / decision / registered`）: subject identity、`previous_event_id` と `previous_event_sha256`、`expected_previous_state`、actor / reason
-  - **opportunity**: unique `opportunity_id`、trigger source、task metadata snapshot または `unverifiable` 理由
-  - **invoked / completed / blocked**: `opportunity_id` 必須（先行 opportunity を参照）。`blocked.block_kind` は閉じた enum（`input_missing / precondition_failed / permission_pending / external_unavailable / operator_cancelled`）
+- schema は `distill-event.schema.json`。event type 別の必須 field は `allOf` の `if/then` で閉じる（`oneOf` は使わない）:
+  - **registered**（人・非 state event）: `distill_id` の付与を記録。state field を持たない
+  - **observed**（`system`・自動）: 閾値到達。`absent → observed` のみ。`threshold {window_days, min_opportunities, counted_event_ids}` を必須
+  - **nominated**（人）: `absent | observed | held → nominated`。`absent` 以外は `previous_event_id / previous_event_sha256` を必須
+  - **decision**（人）: `nominated → held | rejected | accepted`。常に previous event を束縛
+  - **opportunity**: unique `opportunity_id`、`trigger {trigger_source, trigger_ref, task_metadata_status}`。`status=snapshot` なら `task_metadata` 必須・`unverifiable_reason` 禁止、`status=unverifiable` なら非空 `unverifiable_reason` 必須・`task_metadata` 禁止（取得できた部分は `partial_task_metadata`）。`trigger_ref` は非空必須
+  - **invoked / completed / blocked**: `opportunity_id` 必須（先行 opportunity を参照）。`blocked.block_kind` は閉じた enum（`input_missing / precondition_failed / permission_pending / external_unavailable / operator_cancelled`）。invoked / completed は `block_kind` を持たない
+- `trigger_ref` の決定論的代替規則（host が run ID を提供しないとき）: `sha256("<task_id>|<scheduled fire time UTC 分精度>|<host>")` の先頭16hex。同じ発火を二重記録しても同じ ref になり dedupe される
 - host-task adapter は**発火を受けた時点で opportunity を先に記録**し、terminal（completed / blocked）は別 file で書く。crash や入力待ちを「機会0」に誤分類しないため
-- 証拠強度: `source ∈ {host-task, agent-self-report, human}` と `strength ∈ {observed, asserted, unverifiable}`。候補表示の閾値へ算入できるのは `observed` と `asserted`（`unverifiable` は表示のみ）。`agent-self-report` は best-effort で、取り忘れは「機会なし」の証明にならない。重複 opportunity の dedupe key は `(subject, trigger_source, trigger_ref)` 。**これは安全 gate ではなく静かな候補発見であり、false negative を許容する**
+- 証拠強度: `source ∈ {host-task, agent-self-report, human, system}` と `strength ∈ {observed, asserted, unverifiable}`。候補表示の閾値へ算入できるのは `observed` と `asserted`（`unverifiable` は表示のみ）。`agent-self-report` は best-effort で、取り忘れは「機会なし」の証明にならない。重複 opportunity の dedupe key は `(subject, trigger_source, trigger_ref)`。**これは安全 gate ではなく静かな候補発見であり、false negative を許容する**
+
+| event_type | source | 必須 field（共通 field 以外） | 前状態 → 新状態 |
+|---|---|---|---|
+| registered | human | reason, subject(page: distill_id/page_path/page_sha256) | （state 変化なし） |
+| observed | system | threshold, expected_previous_state, new_state | absent → observed |
+| nominated | human | reason, expected_previous_state, new_state（＋absent 以外は previous_event_id/sha256） | absent/observed/held → nominated |
+| decision | human | reason, previous_event_id/sha256, expected_previous_state, new_state | nominated → held/rejected/accepted |
+| opportunity | host-task/agent-self-report/human | opportunity_id, trigger | — |
+| invoked / completed | 同上 | opportunity_id | — |
+| blocked | 同上 | opportunity_id, block_kind | — |
+
+この表が遷移の**正本**であり、merge 2 の validator は同じ表から生成した遷移集合を検査する。
 - 派生物: `distill/_index.md`・`wiki-health` の候補件数は event 群からの再生成のみ。参照整合性（`distilled_to` の slug 存在）は派生 index ではなく **authoritative record（candidate / release manifest）**へ照合し、その後「再生成 index と checked-in index の一致」を別検査する（C-03）
 
 ## 4. 3つの状態機械（D-03・C-07）
@@ -49,14 +65,14 @@ Wikiに蓄積された**手順型の知**を、人の指名を起点に、検証
 
 ```
 absent ──nominate──▶ nominated ──decide──▶ accepted
-   │                    │   ▲                 
+   │                    │   ▲
    └(auto)▶ observed ───┘   └──decide(held→nominated 再開)
 nominated ──decide──▶ held | rejected
 ```
 
-- `observed` は自動（閾値到達）。`absent → nominated` は人の直接指名（同一 transaction で `registered`＋`nominated` の2 event を発行）
-- 遷移は人の明示操作のみ。verb: `nominate <Page>`／`status`（read-only）／`decide <distill_id> <held|rejected|accepted> --reason`
-- state-changing event は lock 取得後に head（最新 event）の一致を再検査してから exclusive create する
+- `observed` は自動（閾値到達・`observed` event・source `system`）。`absent → nominated` は人の直接指名: 同一 lock 内で frontmatter 付与＋`registered`（非 state event・identity 登録）＋`nominated`（state transition）を commit する。state を変えるのは `observed / nominated / decision` の3 type だけ
+- 人による遷移は明示操作のみ。verb: `nominate <Page>`／`status`（read-only）／`decide <distill_id> <held|rejected|accepted> --reason`
+- state-changing event は lock 取得後に head（最新 event）の一致（`previous_event_id / previous_event_sha256 / expected_previous_state`）を再検査してから exclusive create する
 
 ### release（manifest）
 
@@ -101,17 +117,20 @@ Wiki ref / runtime ref / candidate tree の drift は manifest state を書き�
 
 ## 9. 観測（D-08・C-09）
 
-- 判定は `min_observation_period`（初期 4週間）**かつ** `min_eligible_opportunities`（初期 3）**かつ** `min_completed_opportunities`（初期 2）を満たしてから
+- 判定は `min_observation_period`（初期 4週間）**かつ** `min_eligible_opportunities`（初期 3・最低 1）**かつ** `min_completed_opportunities`（初期 2・最低 1）を満たしてから
 - 1 opportunity に terminal は最大1つ（`completed` と `blocked` の二重計上を拒否）。`blocked` は opportunity 数には含めるが completed には含めない。入力不足ばかりなら fail ではなく inconclusive
-- 機会0 → inconclusive。deprecate / reject は自動でなく人の decision
+- 機会0 → inconclusive。未終了 opportunity（invoked のまま terminal なし）が残る間は pass にしない。deprecate / reject は自動でなく人の decision
+- `pass | fail` を記録する manifest 版は監査 field を必須にする: `window {start, end}`・`eligible_count`・`completed_count`・`blocked_count`・`unterminated_count`・`terminal_conflicts`（= 0）・`event_set {head_event_id, events_sha256, evidence}`（集計した event 集合の hash と evidence）。閾値と自己申告 verdict だけでは監査不能
 
 ## 10. schema と validator/guard の分離（D-06）
 
 - `manifest.schema.json` は共通 field のみ。タスク固有 field は `extensions.<plugin-id>`（`additionalProperties: false` は core 側で維持）
 - validator（merge 2 の `distill validate`）: versions dir の add-only、前版から継承禁止の field（`supersede_reason` 等）、許可遷移、evidence 参照先の推移的 hash、`candidate ≡ deployed`（logical path 写像）。git pre-commit guard を含む
+- 単一 JSON Schema では表せない invariant（validator の責務として明記）: 1 opportunity に terminal 最大1つ（event 集合全体）、observation の各 count と閾値の比較（`pass` は3条件すべて達成時のみ）、`decision.bound_to` の各 hash が同版の実値と一致すること、`wiki_refs` 集合が approved decision の `wiki_ref_sha256s` と一致すること、`state=rejected` の decision が reject であること
+- schema 自体が閉じる invariant（merge 1 で実装済み）: `decision.status ∈ {approved, rejected}` なら `by / at / reason / given_via / bound_to`（全 field）必須／`state ∈ {deployed, deprecated}` なら approved decision と非 null `deployed_bundles`／`state = rejected` なら reject decision／`proposed | validated` では `deployed_bundles = null`／`verdict ∈ {pass, fail}` なら監査 field 必須・`terminal_conflicts = 0`／`pass` は `eligible ≥ 1`・`completed ≥ 1`・`unterminated = 0`／最低件数は 1 以上
 
 ## 11. 共通の ID / hash 規則
 
 - hash は SHA-256 hex 64桁。bundle hash は `logical_path\0sha256` を logical path 昇順で `\n` 連結した文字列の SHA-256（pilot と同一）
 - 時刻は UTC `YYYY-MM-DDTHH:MM:SSZ`。ID の乱数部は `secrets.token_hex(4)`
-- path は Vault / repo 相対・`/` 区切り。環境固有の絶対 path を record に書かない
+- path は Vault / repo 相対・`/` 区切り。環境固有の絶対 path を record に書かない。manifest の `wiki_refs` は絶対 path の代わりに **portable な `base_id`**（例 `vault`）を持ち、実 path への解決は host 設定側で行う。schema は `portable_path`（ドライブ文字・先頭 `/`・`~`・バックスラッシュを禁止）で機械的に拒否する
