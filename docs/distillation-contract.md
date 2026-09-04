@@ -30,7 +30,7 @@ Wikiに蓄積された**手順型の知**を、人の指名を起点に、検証
 
 - `distilled_to: [<slug>]`（slugのみ。`@vN` を書かない——Skill版更新→Wiki更新→wiki_refs drift の自己誘発ループを避ける）
 - `procedure` は厳密 boolean。`distill_id`・`procedure`・review field のいずれかが欠ければ**蒸留対象外**（後方互換: 既存ページは全て対象外から始まる。一括推定付与はしない）
-- `distill_id` の付与時期: 自動計数の対象は明示的に `procedure: true`・`distill_id`・review field を持つページのみ。未登録ページを人が直接 nominate する場合、**frontmatter付与と nomination event を同一 lock 内**で行う。Wikiページを持たない scheduled task は page event に押し込まず `subject_type: task`（task discovery）として記録し、正本ページ作成・review 後に page identity へ束縛する
+- `distill_id` の付与時期: 自動計数の対象は明示的に `procedure: true`・`distill_id`・review field を持つページのみ。未登録ページを人が直接 nominate する場合、**frontmatter付与と nomination event を同一 lock 内**で行う。Wikiページを持たない scheduled task は page event に押し込まず `subject_type: task`（task discovery）として記録し、正本ページ作成・review 後に page identity へ束縛する。**candidate の state を変える event（`observed / nominated / decision`）は review 済み page identity（`subject_type: page`＋`distill_id / page_path / page_sha256`）にしか発行できない**（schema で const）。task discovery は candidate state ではなく `subject_type: task` の opportunity / discovery evidence であり、正本ページ作成後は `registered` / `nominated` の page event または proposal の `source_refs`（role `task-board` / `existing-skill`・sha256 付き）からその task evidence へ辿れるようにする
 
 ## 3. event（D-01・C-04・C-05・C-07）
 
@@ -126,6 +126,7 @@ Wiki ref / runtime ref / candidate tree の drift は manifest state を書き�
 
 - `manifest.schema.json` は共通 field のみ。タスク固有 field は `extensions.<plugin-id>`（`additionalProperties: false` は core 側で維持）
 - validator（merge 2 の `distill validate`）: versions dir の add-only、前版から継承禁止の field（`supersede_reason` 等）、許可遷移、evidence 参照先の推移的 hash、`candidate ≡ deployed`（logical path 写像）。git pre-commit guard を含む
+- resolver の責務（merge 2）: `base_id` を canonical resolve し、`portable_path` を結合した**解決後 path が base 配下であること**を比較する（`..` 以外にも symlink / junction 経由の base 脱出を fail-closed。pilot の lexical 一致＋reparse 検査と同じ規律）。schema の `portable_path` は字句検査（segment 単位で `.`・`..`・空・制御文字・バックスラッシュ・ドライブ文字・`~` を拒否）に留まる
 - 単一 JSON Schema では表せない invariant（validator の責務として明記）: 1 opportunity に terminal 最大1つ（event 集合全体）、observation の各 count と閾値の比較（`pass` は3条件すべて達成時のみ）、`decision.bound_to` の各 hash が同版の実値と一致すること、`wiki_refs` 集合が approved decision の `wiki_ref_sha256s` と一致すること、`state=rejected` の decision が reject であること
 - schema 自体が閉じる invariant（merge 1 で実装済み）: `decision.status ∈ {approved, rejected}` なら `by / at / reason / given_via / bound_to`（全 field）必須／`state ∈ {deployed, deprecated}` なら approved decision と非 null `deployed_bundles`／`state = rejected` なら reject decision／`proposed | validated` では `deployed_bundles = null`／`verdict ∈ {pass, fail}` なら監査 field 必須・`terminal_conflicts = 0`／`pass` は `eligible ≥ 1`・`completed ≥ 1`・`unterminated = 0`／最低件数は 1 以上
 
@@ -133,4 +134,4 @@ Wiki ref / runtime ref / candidate tree の drift は manifest state を書き�
 
 - hash は SHA-256 hex 64桁。bundle hash は `logical_path\0sha256` を logical path 昇順で `\n` 連結した文字列の SHA-256（pilot と同一）
 - 時刻は UTC `YYYY-MM-DDTHH:MM:SSZ`。ID の乱数部は `secrets.token_hex(4)`
-- path は Vault / repo 相対・`/` 区切り。環境固有の絶対 path を record に書かない。manifest の `wiki_refs` は絶対 path の代わりに **portable な `base_id`**（例 `vault`）を持ち、実 path への解決は host 設定側で行う。schema は `portable_path`（ドライブ文字・先頭 `/`・`~`・バックスラッシュを禁止）で機械的に拒否する
+- path は Vault / repo 相対・`/` 区切り。環境固有の絶対 path を record に書かない。manifest の `wiki_refs` は絶対 path の代わりに **portable な `base_id`**（例 `vault`）を持ち、実 path への解決は host 設定側で行う。schema は `portable_path`（ドライブ文字・先頭 `/`・`~`・バックスラッシュに加え、segment 単位の `.`・`..`・空 segment（`//`・末尾 `/`）・制御文字を禁止。`<run_id>` のような placeholder・日本語・空白は許す）で機械的に拒否し、base 配下の containment は resolver（§10）が再検査する

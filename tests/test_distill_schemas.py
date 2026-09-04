@@ -14,7 +14,9 @@ ROOT = Path(__file__).resolve().parent.parent / "schema" / "distill"
 SHA = "a" * 64
 UTC = "2026-09-04T09:00:00Z"
 EID = "20260904T080000Z-0badcafe"
-BAD_PATHS = ("C:/x/y.md", "/abs/y.md", "~/y.md", "a\\b.md", "")
+BAD_PATHS = ("C:/x/y.md", "/abs/y.md", "~/y.md", "a\\b.md", "",
+             "../outside", "../../secret", "a/../../x", "./x", "a/./x", "a//b", "a/", ".", "..", "a\x01b")
+GOOD_PATHS = ("a/b.md", "runs/<run_id>/report.json", "scheduled-tasks/x/SKILL.md", "日本語/空白 あり.md")
 
 
 def _load(name):
@@ -147,7 +149,36 @@ class TestDistillEvent(unittest.TestCase):
                    expected_previous_state="nominated", new_state="held", previous_event_id=EID, previous_event_sha256=SHA)
         self.assertTrue(_bad(self.s, dict(dec, opportunity_id="op-20260904T090000Z-0badcafe")))
 
-    # --- R2-03 ---
+    # --- R3-01 ---
+    def test_r3_01_candidate_state_events_require_reviewed_page(self):
+        task = {"subject_type": "task", "task_id": "monthly-listing-recon-csv"}
+        skill = {"subject_type": "skill", "skill_slug": "monthly-listing-recon-csv"}
+        nom = dict(self.base, event_type="nominated", source="human", actor="tonsuke", reason="x",
+                   expected_previous_state="absent", new_state="nominated")
+        dec = dict(self.base, event_type="decision", source="human", actor="tonsuke", reason="ok",
+                   expected_previous_state="nominated", new_state="accepted", previous_event_id=EID, previous_event_sha256=SHA)
+        obs = dict(self.base, event_type="observed", source="system", actor="wiki-health",
+                   expected_previous_state="absent", new_state="observed",
+                   threshold={"window_days": 30, "min_opportunities": 3, "counted_event_ids": [EID]})
+        for ev in (nom, dec, obs):
+            for subj in (task, skill):
+                self.assertTrue(_bad(self.s, dict(ev, subject=subj)), (ev["event_type"], subj["subject_type"]))
+            _ok(self.s, dict(ev, subject=self._page()))
+            # page subject は distill_id/page_path/page_sha256 が必須
+            for missing in ("distill_id", "page_path", "page_sha256"):
+                p = dict(self._page()); p.pop(missing)
+                self.assertTrue(_bad(self.s, dict(ev, subject=p)), (ev["event_type"], missing))
+        # task discovery は opportunity として記録できる（candidate state ではない）
+        _ok(self.s, self._opp())
+
+    # --- R2-03 / R3-02 ---
+    def test_r3_02_good_paths_accepted(self):
+        n = dict(self.base, event_type="nominated", subject=self._page(), source="human", actor="t", reason="x",
+                 expected_previous_state="absent", new_state="nominated")
+        for good in GOOD_PATHS:
+            e = json.loads(json.dumps(n)); e["subject"]["page_path"] = good
+            _ok(self.s, e)
+
     def test_r2_03_portable_paths_in_event(self):
         n = dict(self.base, event_type="nominated", subject=self._page(), source="human", actor="t", reason="x",
                  expected_previous_state="absent", new_state="nominated")

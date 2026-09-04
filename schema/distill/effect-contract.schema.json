@@ -31,7 +31,7 @@
     "extensions": {"type": "object", "propertyNames": {"pattern": "^[a-z0-9][a-z0-9-]*$"}}
   },
   "$defs": {
-    "portable_path": {"type": "string", "minLength": 1, "pattern": "^(?![A-Za-z]:)(?!/)(?!\\\\)(?!~)[^\\\\]*$", "description": "相対 path・/ 区切り。ドライブ文字・先頭 /・~・バックスラッシュを禁止"},
+    "portable_path": {"type": "string", "minLength": 1, "pattern": "^(?![A-Za-z]:)(?!~)(?!\\.\\.?(?:/|$))[^/\\\\\\x00-\\x1f]+(?:/(?!\\.\\.?(?:/|$))[^/\\\\\\x00-\\x1f]+)*$", "description": "相対 path・/ 区切り。ドライブ文字・先頭 /・~・バックスラッシュを禁止"},
     "effect": {
       "type": "object",
       "required": ["id", "resource", "target", "op", "reversibility", "idempotency", "human_action"],

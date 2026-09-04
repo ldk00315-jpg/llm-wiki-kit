@@ -81,6 +81,7 @@
       "if": {"properties": {"event_type": {"const": "observed"}}},
       "then": {"required": ["threshold", "expected_previous_state", "new_state"],
                "properties": {"source": {"const": "system"}, "strength": {"const": "observed"},
+                              "subject": {"properties": {"subject_type": {"const": "page"}}},
                               "expected_previous_state": {"const": "absent"}, "new_state": {"const": "observed"}},
                "not": {"anyOf": [{"required": ["opportunity_id"]}, {"required": ["trigger"]}, {"required": ["block_kind"]},
                                  {"required": ["previous_event_id"]}, {"required": ["previous_event_sha256"]}]}}
@@ -90,6 +91,7 @@
       "if": {"properties": {"event_type": {"const": "nominated"}}},
       "then": {"required": ["reason", "expected_previous_state", "new_state"],
                "properties": {"source": {"const": "human"}, "strength": {"const": "observed"},
+                              "subject": {"properties": {"subject_type": {"const": "page"}}},
                               "expected_previous_state": {"enum": ["absent", "observed", "held"]}, "new_state": {"const": "nominated"}},
                "not": {"anyOf": [{"required": ["opportunity_id"]}, {"required": ["trigger"]}, {"required": ["threshold"]}, {"required": ["block_kind"]}]},
                "allOf": [
@@ -103,6 +105,7 @@
       "if": {"properties": {"event_type": {"const": "decision"}}},
       "then": {"required": ["reason", "expected_previous_state", "new_state", "previous_event_id", "previous_event_sha256"],
                "properties": {"source": {"const": "human"}, "strength": {"const": "observed"},
+                              "subject": {"properties": {"subject_type": {"const": "page"}}},
                               "expected_previous_state": {"const": "nominated"}, "new_state": {"enum": ["held", "rejected", "accepted"]}},
                "not": {"anyOf": [{"required": ["opportunity_id"]}, {"required": ["trigger"]}, {"required": ["threshold"]}, {"required": ["block_kind"]}]}}
     },
@@ -136,7 +139,7 @@
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "utc": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
     "event_id": {"type": "string", "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$"},
-    "portable_path": {"type": "string", "minLength": 1, "pattern": "^(?![A-Za-z]:)(?!/)(?!\\\\)(?!~)[^\\\\]*$", "description": "相対 path・/ 区切り。ドライブ文字・先頭 /・~・バックスラッシュを禁止"},
+    "portable_path": {"type": "string", "minLength": 1, "pattern": "^(?![A-Za-z]:)(?!~)(?!\\.\\.?(?:/|$))[^/\\\\\\x00-\\x1f]+(?:/(?!\\.\\.?(?:/|$))[^/\\\\\\x00-\\x1f]+)*$", "description": "相対 path・/ 区切り。ドライブ文字・先頭 /・~・バックスラッシュを禁止"},
     "evidence_ref": {
       "type": "object",
       "required": ["path", "sha256"],
