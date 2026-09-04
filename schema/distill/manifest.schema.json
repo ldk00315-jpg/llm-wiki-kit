@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki-kit/schema/distill/manifest.schema.json",
+  "title": "distill release manifest（1 version 1 file・append-only）。型検査のみ。add-only・継承禁止 field・許可遷移・推移的 hash・candidate≡deployed は validator/guard が検査する",
+  "type": "object",
+  "required": ["skill", "version", "state", "created", "supersedes", "supersede_reason", "runtime_refs", "common_runtime_sha256", "candidate_bundles", "deployed_bundles", "decision", "validation_evidence", "wiki_refs", "effect_contract", "observation"],
+  "additionalProperties": false,
+  "properties": {
+    "skill": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"},
+    "version": {"type": "integer", "minimum": 1},
+    "state": {"enum": ["proposed", "validated", "deployed", "deprecated", "rejected"]},
+    "created": {"type": "string"},
+    "supersedes": {"type": ["integer", "null"]},
+    "supersede_reason": {"type": "string", "minLength": 1, "description": "版固有。前版から継承しない"},
+    "note": {"type": "string"},
+    "runtime_refs": {"type": "array", "items": {"$ref": "#/$defs/file_ref"}},
+    "common_runtime_sha256": {"$ref": "#/$defs/sha256"},
+    "candidate_bundles": {
+      "type": "object", "required": ["logical_paths"],
+      "properties": {"logical_paths": {"type": "array", "items": {"type": "string"}}},
+      "additionalProperties": {"$ref": "#/$defs/sha256"}
+    },
+    "deployed_bundles": {
+      "type": ["object", "null"],
+      "additionalProperties": {
+        "type": "object", "required": ["files", "deployment_id", "deployed_at"], "additionalProperties": false,
+        "properties": {
+          "deployment_id": {"type": "string"},
+          "deployed_at": {"type": "string"},
+          "files": {"type": "array", "items": {
+            "type": "object", "required": ["logical_path", "deployed_path", "sha256"], "additionalProperties": false,
+            "properties": {"logical_path": {"type": "string"}, "deployed_path": {"type": "string"}, "sha256": {"$ref": "#/$defs/sha256"}}
+          }}
+        }
+      }
+    },
+    "decision": {
+      "type": "object", "required": ["status"], "additionalProperties": false,
+      "properties": {
+        "status": {"enum": [null, "approved", "rejected"]},
+        "by": {"type": ["string", "null"]},
+        "at": {"type": ["string", "null"]},
+        "reason": {"type": ["string", "null"]},
+        "given_via": {"type": ["string", "null"]},
+        "bound_to": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "manifest_version": {"type": "integer"},
+            "candidate_bundle_sha256": {"$ref": "#/$defs/sha256"},
+            "common_runtime_sha256": {"$ref": "#/$defs/sha256"},
+            "effect_contract_sha256": {"$ref": "#/$defs/sha256"},
+            "wiki_ref_sha256s": {"type": "array", "items": {"$ref": "#/$defs/sha256"}}
+          }
+        },
+        "evidence": {"type": "array", "items": {"$ref": "#/$defs/file_ref"}}
+      }
+    },
+    "validation_evidence": {"type": "array", "items": {"$ref": "#/$defs/file_ref"}},
+    "negative_evidence": {"type": "array", "items": {"$ref": "#/$defs/file_ref_role"}},
+    "invalidated_evidence": {"type": "array", "items": {"$ref": "#/$defs/file_ref_reason"}},
+    "observation_findings": {"type": "array", "items": {
+      "type": "object", "required": ["id", "evidence", "status"], "additionalProperties": false,
+      "properties": {"id": {"type": "string"}, "run_id": {"type": "string"}, "evidence": {"type": "string"}, "status": {"type": "string"}}
+    }},
+    "wiki_refs": {"type": "array", "items": {
+      "type": "object", "required": ["path", "sha256", "review"], "additionalProperties": false,
+      "properties": {"abs_base": {"type": "string"}, "path": {"type": "string"}, "sha256": {"$ref": "#/$defs/sha256"}, "distill_id": {"type": "string"}, "review": {"type": "string", "pattern": "^(approved|pending):.*"}}
+    }},
+    "effect_contract": {"$ref": "#/$defs/file_ref"},
+    "observation": {
+      "type": "object", "required": ["min_observation_period_days", "min_eligible_opportunities", "min_completed_opportunities", "verdict"], "additionalProperties": false,
+      "properties": {
+        "min_observation_period_days": {"type": "integer", "minimum": 1},
+        "min_eligible_opportunities": {"type": "integer", "minimum": 0},
+        "min_completed_opportunities": {"type": "integer", "minimum": 0},
+        "verdict": {"enum": ["pending", "inconclusive", "pass", "fail"]},
+        "verdict_by": {"type": "string"}, "verdict_at": {"type": "string"}, "verdict_reason": {"type": "string"}
+      }
+    },
+    "extensions": {"type": "object", "propertyNames": {"pattern": "^[a-z0-9][a-z0-9-]*$"}, "description": "タスク固有 field は extensions.<plugin-id> へ"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "file_ref": {"type": "object", "required": ["path", "sha256"], "additionalProperties": false,
+                 "properties": {"path": {"type": "string"}, "sha256": {"$ref": "#/$defs/sha256"}}},
+    "file_ref_role": {"type": "object", "required": ["path", "sha256", "role"], "additionalProperties": false,
+                      "properties": {"path": {"type": "string"}, "sha256": {"$ref": "#/$defs/sha256"}, "role": {"type": "string"}}},
+    "file_ref_reason": {"type": "object", "required": ["path", "sha256", "reason"], "additionalProperties": false,
+                        "properties": {"path": {"type": "string"}, "sha256": {"$ref": "#/$defs/sha256"}, "reason": {"type": "string"}}}
+  }
+}

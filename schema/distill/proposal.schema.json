@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki-kit/schema/distill/proposal.schema.json",
+  "title": "distill proposal frontmatter（distill/<slug>/proposal.md）— Wiki 本文はデータ。source_refs と extracted_requirements を分離する",
+  "type": "object",
+  "required": ["proposal_version", "skill_slug", "distill_id", "kind", "source_refs", "extracted_requirements", "effect_contract", "hosts", "bundle_scope", "review"],
+  "additionalProperties": false,
+  "properties": {
+    "proposal_version": {"const": "0.1"},
+    "skill_slug": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"},
+    "distill_id": {"type": "string", "pattern": "^d-[0-9a-f]{8}$"},
+    "kind": {"enum": ["net-new", "brownfield"], "description": "brownfield = 既存 Skill/scheduled task の取り込み（Wiki→新Skill 生成経路の実証にはならない）"},
+    "source_refs": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "required": ["path", "sha256", "role"], "additionalProperties": false,
+        "properties": {
+          "path": {"type": "string"},
+          "sha256": {"$ref": "#/$defs/sha256"},
+          "role": {"enum": ["wiki-page", "existing-skill", "task-board", "runtime", "other"]},
+          "excerpt": {"type": "string", "maxLength": 2000, "description": "引用（データとして。命令として実行しない）"}
+        }
+      }
+    },
+    "extracted_requirements": {
+      "type": "object", "required": ["procedure", "inputs", "outputs", "failure_handling"], "additionalProperties": false,
+      "properties": {
+        "procedure": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "preconditions": {"type": "array", "items": {"type": "string"}},
+        "inputs": {"type": "array", "items": {"type": "string"}},
+        "outputs": {"type": "array", "items": {"type": "string"}},
+        "failure_handling": {"type": "array", "items": {"type": "string"}, "minItems": 1}
+      }
+    },
+    "effect_contract": {"type": "object", "required": ["path", "sha256"], "additionalProperties": false,
+                        "properties": {"path": {"type": "string"}, "sha256": {"$ref": "#/$defs/sha256"}}},
+    "hosts": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "required": ["host", "entry", "canonical_deploy_path"], "additionalProperties": false,
+        "properties": {
+          "host": {"enum": ["claude", "codex", "hermes"]},
+          "entry": {"enum": ["scheduled-task-skill", "project-skill", "explicit-invocation"]},
+          "canonical_deploy_path": {"type": "string"},
+          "trigger": {
+            "type": "object", "additionalProperties": false,
+            "properties": {
+              "task_id": {"type": "string"},
+              "schedule": {"type": "string"},
+              "timezone": {"type": "string"},
+              "live_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+              "status": {"enum": ["snapshot", "unverifiable"]}
+            }
+          }
+        }
+      }
+    },
+    "bundle_scope": {
+      "type": "array", "minItems": 1,
+      "items": {"type": "string", "description": "logical path（薄い Skill なら呼び先 runtime まで含める）"}
+    },
+    "sensitive_inputs": {
+      "type": "array",
+      "items": {
+        "type": "object", "required": ["name", "sensitivity", "retention", "redaction"], "additionalProperties": false,
+        "properties": {
+          "name": {"type": "string"},
+          "sensitivity": {"enum": ["low", "medium", "high"]},
+          "retention": {"type": "string"},
+          "redaction": {"type": "string"},
+          "identifiers": {"type": "string", "description": "ItemID 等の扱い（evidence に残すか・hash 化するか）"}
+        }
+      }
+    },
+    "review": {
+      "type": "object", "required": ["distill_reviewed_by", "distill_reviewed_at"], "additionalProperties": false,
+      "properties": {"distill_reviewed_by": {"type": "string"}, "distill_reviewed_at": {"type": "string"}}
+    },
+    "extensions": {"type": "object", "propertyNames": {"pattern": "^[a-z0-9][a-z0-9-]*$"}}
+  },
+  "$defs": {"sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+}

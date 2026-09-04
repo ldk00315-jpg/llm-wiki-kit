@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki-kit/schema/distill/effect-contract.schema.json",
+  "title": "effect contract — attestation（宣言は guard/test/evidence を決める監査契約。未発見の未宣言 effect を runtime で deny できるとは主張しない）",
+  "type": "object",
+  "required": ["contract_version", "skill_slug", "effects", "attestation"],
+  "additionalProperties": false,
+  "properties": {
+    "contract_version": {"const": "0.1"},
+    "skill_slug": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"},
+    "attestation": {
+      "type": "object",
+      "required": ["declared_by", "declared_at", "guarantee_ceiling"],
+      "additionalProperties": false,
+      "properties": {
+        "declared_by": {"type": "string"},
+        "declared_at": {"type": "string"},
+        "guarantee_ceiling": {"const": "review+probe+sandbox: undeclared effects found there fail validation; no runtime deny claimed"}
+      }
+    },
+    "effects": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/effect"}
+    },
+    "concurrency": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {"lock": {"enum": ["pipeline-wide", "per-target", "none"]}, "stale_recovery": {"enum": ["manual-only", "owner-bound-resolve"]}}
+    },
+    "extensions": {"type": "object", "propertyNames": {"pattern": "^[a-z0-9][a-z0-9-]*$"}}
+  },
+  "$defs": {
+    "effect": {
+      "type": "object",
+      "required": ["id", "resource", "target", "op", "reversibility", "idempotency", "human_action"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "pattern": "^e[0-9]{2,3}$"},
+        "resource": {"enum": ["external-api", "external-document", "local-file", "local-db", "secret-file", "host-config", "notification", "human"]},
+        "target": {"type": "string", "description": "何を（spreadsheet ID・path glob・DB名・endpoint）。secret の値は書かない（locator のみ）"},
+        "op": {"enum": ["read", "write", "replace", "delete", "notify", "human_action"]},
+        "reversibility": {"enum": ["none", "backup_restore", "compensating", "recreate_from_source"]},
+        "idempotency": {"enum": ["idempotent", "keyed", "non_idempotent", "unknown"]},
+        "human_action": {"enum": ["required", "none"]},
+        "credential_locator": {"type": "string", "description": "file 名や env 名。値は書かない"},
+        "network": {
+          "type": "object", "additionalProperties": false,
+          "properties": {"endpoint": {"type": "string"}, "direction": {"enum": ["read", "write", "both"]}}
+        },
+        "local_io": {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "sensitivity"],
+          "properties": {
+            "kind": {"enum": ["input", "output", "both"]},
+            "sensitivity": {"enum": ["low", "medium", "high"]},
+            "retention": {"type": "string", "description": "保存期間と削除主体"},
+            "redaction": {"type": "string", "description": "evidence に残してよい field / 残さない field（ID 等）"}
+          }
+        },
+        "backup": {
+          "type": "object", "additionalProperties": false,
+          "required": ["method", "taken_before_write"],
+          "properties": {"method": {"type": "string"}, "taken_before_write": {"const": true}, "scope": {"type": "string"}}
+        },
+        "postcondition": {"type": "string", "description": "mutation set 以上を比較する条件（values・書式・順序…）"},
+        "freshness": {"type": "string", "description": "read: 取得物の新しさの条件（mtime・period）"},
+        "completeness": {"type": "string", "description": "read: 取得物の完全性の条件（件数・schema）"}
+      },
+      "allOf": [
+        {"if": {"properties": {"op": {"enum": ["write", "replace", "delete"]}}}, "then": {"required": ["backup", "postcondition"]}},
+        {"if": {"properties": {"op": {"const": "read"}}}, "then": {"required": ["freshness", "completeness"]}},
+        {"if": {"properties": {"resource": {"enum": ["external-api", "external-document"]}}}, "then": {"required": ["network", "credential_locator"]}},
+        {"if": {"properties": {"resource": {"enum": ["local-file", "secret-file"]}}}, "then": {"required": ["local_io"]}},
+        {"if": {"properties": {"op": {"const": "human_action"}}}, "then": {"properties": {"human_action": {"const": "required"}, "resource": {"const": "human"}}}}
+      ]
+    }
+  }
+}
