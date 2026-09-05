@@ -440,9 +440,13 @@ def reindex_locked(root: Path, events: list[dict] | None = None) -> Path:
 
 
 def cmd_reindex(root: Path) -> Path:
-    """CLI verb。lock を取ってから再生成する（並行する mutating verb との競合を避ける）。"""
+    """CLI verb。lock を取り、**store health を確認してから**再生成する（V3-R2）。
+
+    破損 store の valid subset で派生物を作ると、壊れた状態を「正常な index」として固定してしまう。
+    """
     with VaultLock(root):
-        return reindex_locked(root)
+        events = assert_store_healthy(root)
+        return reindex_locked(root, events)
 
 
 # ---------------------------------------------------------------------------
@@ -477,15 +481,27 @@ def opportunity_counts(events: list[dict], *, window_days: int = DEFAULT_WINDOW_
     return out
 
 
-def assert_store_healthy(root: Path) -> list[dict]:
-    """**lock 内で**呼ぶ。event store に破損があれば書き込みを拒否し、健全なら valid events を返す（V2-R1）。
+def store_health(root: Path) -> tuple[list[dict], list[str]]:
+    """store health の**単一の定義**（V3-R1）: load diagnostics ＋ 全 event の schema / 遷移検証。
 
-    破損を放置したまま書くと、巻き戻った head の上に新しい event を積むことになり、
-    immutable store へ回復困難な不整合を足してしまう。
+    「JSON として読めて filename が一致する」だけでは健全ではない。schema や遷移表に反する event が
+    1件でもあれば、その store の上に新しい event を積んではいけないし、派生物も作り直さない。
     """
     events, problems = scan_events(root)
+    for ev in events:
+        problems += [f"{ev.get('event_id')}: {p}" for p in validate_event(ev)]
+    return events, problems
+
+
+def assert_store_healthy(root: Path) -> list[dict]:
+    """**lock 内で**呼ぶ。健全でなければ書き込みを拒否し、健全なら validated events を返す。
+
+    破損や不正を放置したまま書くと、巻き戻った head の上に新しい event を積むことになり、
+    immutable store へ回復困難な不整合を足してしまう。
+    """
+    events, problems = store_health(root)
     if problems:
-        raise DistillError("event store が壊れています（先に修復してください）:\n  " + "\n  ".join(problems))
+        raise DistillError("event store が健全ではありません（先に修復してください）:\n  " + "\n  ".join(problems))
     return events
 
 
@@ -665,7 +681,7 @@ def derive_trigger_ref(task_id: str, fire_time_utc: str, host: str) -> str:
 def cmd_status(root: Path, distill_id: str | None = None, window_days: int = DEFAULT_WINDOW_DAYS,
                min_opportunities: int = DEFAULT_MIN_OPPORTUNITIES) -> int:
     """read-only。state を変えない。store が壊れていれば警告し rc=2（巻き戻った state を正常に見せない）。"""
-    events, load_problems = scan_events(root)
+    events, load_problems = store_health(root)      # V3-R1: load 診断＋schema/遷移の両方
     if load_problems:
         print("WARNING: event store に問題があります（表示中の state は不完全です）:", file=sys.stderr)
         for p in load_problems:
@@ -697,17 +713,15 @@ def cmd_status(root: Path, distill_id: str | None = None, window_days: int = DEF
 def cmd_validate(root: Path, *, strict_index: bool = True) -> int:
     """event 集合と派生 index の invariant を検査（単一 schema では表せない分・契約 §10）。"""
     problems = []
-    events, load_problems = scan_events(root)
-    problems += [f"event store: {p}" for p in load_problems]
+    events, health_problems = store_health(root)    # store_health と同じ定義を使う（分岐させない）
+    problems += health_problems
     seen_ids = set()
     valid = []          # V2-R2: schema を通った event だけを cross-event invariant の計算へ渡す
     for ev in events:
-        eprobs = validate_event(ev)
-        problems += [f"{ev.get('event_id')}: {p}" for p in eprobs]
         if ev["event_id"] in seen_ids:
             problems.append(f"duplicate event_id: {ev['event_id']}")
         seen_ids.add(ev["event_id"])
-        if not eprobs:
+        if not validate_event(ev):
             valid.append(ev)
     events = valid
     # 遷移の連鎖: chain を辿り、head 束縛（id と hash）と state 整合を検査

@@ -771,5 +771,102 @@ class TestOpportunityIdUniqueness(DistillCase):
         self.assertEqual(d.cmd_validate(self.root), 2)
 
 
+class TestSchemaInvalidBlocksEverything(DistillCase):
+    """V3-R1/V3-R2: 構文破損・filename 不整合・schema/遷移 不正のどれでも、
+    すべての mutating verb（reindex を含む）がゼロ mutation で拒否し、status/validate は rc=2。"""
+
+    BROKEN = {
+        "syntax": (b"{", "20260101T000000Z-deadbee1"),
+        "non_object": (b"[]", "20260101T000000Z-deadbee2"),
+        "schema_invalid": (b'{"event_id":"20260101T000000Z-deadbee3","event_type":"opportunity"}',
+                           "20260101T000000Z-deadbee3"),
+        "transition_invalid": (b'{"event_id":"20260101T000000Z-deadbee4","occurred_at":"2026-01-01T00:00:00Z",'
+                               b'"event_type":"nominated","subject":{"subject_type":"page","distill_id":"d-00000001",'
+                               b'"page_path":"wiki/x.md","page_sha256":"' + b"a" * 64 + b'"},"source":"human",'
+                               b'"strength":"observed","actor":"t","reason":"r",'
+                               b'"expected_previous_state":"accepted","new_state":"nominated"}',
+                               "20260101T000000Z-deadbee4"),
+    }
+
+    def _break(self, kind):
+        raw, eid = self.BROKEN[kind]
+        d.events_dir(self.root).mkdir(parents=True, exist_ok=True)
+        (d.events_dir(self.root) / f"{eid}.json").write_bytes(raw)
+
+    def _filename_mismatch(self):
+        ev = self._last("nominated")
+        src = d.events_dir(self.root) / f"{ev['event_id']}.json"
+        src.rename(d.events_dir(self.root) / "20260101T000000Z-cafebabe.json")
+
+    def _snapshot(self):
+        idx = d.distill_dir(self.root) / "_index.md"
+        return (sorted(p.name for p in d.events_dir(self.root).glob("*.json")),
+                idx.read_bytes() if idx.exists() else None,
+                self.page.read_bytes())
+
+    def _assert_all_verbs_refuse(self, did):
+        before = self._snapshot()
+        second = self.root / "wiki" / "concepts" / "Second.md"
+        second.write_text(PAGE, encoding="utf-8")
+        for label, fn in (
+            ("nominate", lambda: d.cmd_nominate(self.root, "wiki/concepts/Second.md", "r", actor="t")),
+            ("decide", lambda: d.cmd_decide(self.root, did, "accepted", "r", actor="t")),
+            ("note", lambda: d.cmd_note(self.root, "opportunity", distill_id=did, task_id=None,
+                                        trigger_source="scheduled", trigger_ref="r1", opportunity_id=None,
+                                        block_kind=None, source="host-task", strength="observed", reason=None,
+                                        task_metadata=None, unverifiable_reason=None, actor="h")),
+            ("reindex", lambda: d.cmd_reindex(self.root)),
+        ):
+            with self.subTest(verb=label):
+                with self.assertRaises(d.DistillError):
+                    fn()
+        self.assertNotIn("distill_id", d.read_frontmatter(second))
+        self.assertEqual(self._snapshot(), before, "破損 store では event/index/page が一切変わってはいけない")
+        self.assertEqual(d.cmd_status(self.root), 2)
+        self.assertEqual(d.cmd_validate(self.root), 2)
+
+    def test_each_breakage_blocks_all_verbs(self):
+        for kind in self.BROKEN:
+            with self.subTest(kind=kind):
+                self.setUp()
+                try:
+                    did = self._nominate()
+                    self._break(kind)
+                    self._assert_all_verbs_refuse(did)
+                finally:
+                    self.tearDown()
+        self.setUp()   # tearDown が最後に呼ばれるので整合させる
+
+    def test_filename_mismatch_blocks_all_verbs(self):
+        did = self._nominate()
+        self._filename_mismatch()
+        before = self._snapshot()
+        with self.assertRaises(d.DistillError):
+            d.cmd_reindex(self.root)
+        with self.assertRaises(d.DistillError):
+            d.cmd_decide(self.root, did, "held", "r", actor="t")
+        self.assertEqual(self._snapshot(), before)
+        self.assertEqual(d.cmd_status(self.root), 2)
+
+    def test_missing_index_stays_missing_on_broken_store(self):
+        self._nominate()
+        idx = d.distill_dir(self.root) / "_index.md"
+        idx.unlink()
+        self._break("schema_invalid")
+        with self.assertRaises(d.DistillError):
+            d.cmd_reindex(self.root)
+        self.assertFalse(idx.exists(), "破損 store の valid subset で index を作り直さない")
+
+    def test_healthy_store_still_works(self):
+        did = self._nominate()
+        self.assertEqual(d.cmd_status(self.root), 0)
+        self.assertEqual(d.cmd_validate(self.root), 0)
+        idx = d.distill_dir(self.root) / "_index.md"
+        idx.unlink()
+        d.cmd_reindex(self.root)
+        self.assertTrue(idx.exists())
+        self.assertEqual(d.cmd_decide(self.root, did, "accepted", "ok", actor="t"), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
