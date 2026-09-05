@@ -611,5 +611,165 @@ class TestLockOnEveryMutation(DistillCase):
         self.assertNotIn("distill_id", d.read_frontmatter(p))   # frontmatter も書かれない
 
 
+class TestCorruptStoreBlocksMutation(DistillCase):
+    """V2-R1: 破損した store の上に新しい event を積ませない。"""
+
+    def _corrupt_last(self, event_type):
+        ev = self._last(event_type)
+        p = d.events_dir(self.root) / f"{ev['event_id']}.json"
+        p.write_bytes(b"{")
+        return ev
+
+    def test_decide_refused_on_corrupt_store(self):
+        did = self._nominate()
+        d.cmd_decide(self.root, did, "accepted", "ok", actor="t")
+        self._corrupt_last("decision")
+        before = len(list(d.events_dir(self.root).glob("*.json")))
+        with self.assertRaises(d.DistillError) as cm:
+            d.cmd_decide(self.root, did, "held", "壊れた後の追記", actor="t")
+        self.assertIn("event store", str(cm.exception))
+        self.assertEqual(len(list(d.events_dir(self.root).glob("*.json"))), before,
+                         "破損 store に event を足してはいけない")
+
+    def test_nominate_refused_on_corrupt_store(self):
+        self._nominate()
+        self._corrupt_last("nominated")
+        p = self.root / "wiki" / "concepts" / "Second.md"
+        p.write_text(PAGE, encoding="utf-8")
+        before = len(list(d.events_dir(self.root).glob("*.json")))
+        with self.assertRaises(d.DistillError):
+            d.cmd_nominate(self.root, "wiki/concepts/Second.md", "r", actor="t")
+        self.assertEqual(len(list(d.events_dir(self.root).glob("*.json"))), before)
+        self.assertNotIn("distill_id", d.read_frontmatter(p))
+
+    def test_note_refused_on_corrupt_store(self):
+        did = self._nominate()
+        self._corrupt_last("nominated")
+        before = len(list(d.events_dir(self.root).glob("*.json")))
+        with self.assertRaises(d.DistillError):
+            d.cmd_note(self.root, "opportunity", distill_id=did, task_id=None, trigger_source="scheduled",
+                       trigger_ref="r1", opportunity_id=None, block_kind=None, source="host-task",
+                       strength="observed", reason=None, task_metadata=None, unverifiable_reason=None, actor="h")
+        self.assertEqual(len(list(d.events_dir(self.root).glob("*.json"))), before)
+
+    def test_status_warns_and_returns_nonzero(self):
+        self._nominate()
+        self._corrupt_last("nominated")
+        self.assertEqual(d.cmd_status(self.root), 2)
+
+
+class TestValidatorNeverRaises(DistillCase):
+    """V2-R2: 任意の schema-invalid object でも例外を出さず rc=2 で全問題を列挙する。"""
+
+    def _put(self, eid, payload):
+        d.events_dir(self.root).mkdir(parents=True, exist_ok=True)
+        (d.events_dir(self.root) / f"{eid}.json").write_text(json.dumps(payload, ensure_ascii=False),
+                                                             encoding="utf-8")
+
+    def test_opportunity_without_opportunity_id(self):
+        self._nominate()
+        self._put("20260101T000000Z-deadbeef",
+                  {"event_id": "20260101T000000Z-deadbeef", "event_type": "opportunity"})
+        self.assertEqual(d.cmd_validate(self.root), 2)      # KeyError にならない
+
+    def test_terminal_without_opportunity_id(self):
+        self._nominate()
+        self._put("20260101T000000Z-deadbee1",
+                  {"event_id": "20260101T000000Z-deadbee1", "event_type": "completed",
+                   "occurred_at": "2026-01-01T00:00:00Z", "subject": {"subject_type": "task", "task_id": "t"},
+                   "source": "host-task", "strength": "observed", "actor": "h"})
+        self.assertEqual(d.cmd_validate(self.root), 2)
+
+    def test_state_event_without_subject(self):
+        self._nominate()
+        self._put("20260101T000000Z-deadbee2",
+                  {"event_id": "20260101T000000Z-deadbee2", "event_type": "decision", "new_state": "accepted"})
+        self.assertEqual(d.cmd_validate(self.root), 2)
+
+    def test_garbage_fields_only(self):
+        self._nominate()
+        self._put("20260101T000000Z-deadbee3", {"event_id": "20260101T000000Z-deadbee3", "x": [1, {"y": None}]})
+        self.assertEqual(d.cmd_validate(self.root), 2)
+
+
+class TestSubjectIdentity(DistillCase):
+    """V2-R3: subject の canonical identity を CLI guard と validator が同じ規則で使う。"""
+
+    def _task_opp(self, task_id, ref):
+        d.cmd_note(self.root, "opportunity", distill_id=None, task_id=task_id, trigger_source="scheduled",
+                   trigger_ref=ref, opportunity_id=None, block_kind=None, source="host-task",
+                   strength="observed", reason=None, task_metadata=None, unverifiable_reason=None, actor="h")
+        return self._last("opportunity")["opportunity_id"]
+
+    def test_identity_tuples(self):
+        self.assertEqual(d.subject_identity({"subject_type": "task", "task_id": "a"}), ("task", "a"))
+        self.assertNotEqual(d.subject_identity({"subject_type": "task", "task_id": "a"}),
+                            d.subject_identity({"subject_type": "task", "task_id": "b"}))
+        page_a = {"subject_type": "page", "distill_id": "d-00000001", "page_path": "wiki/a.md", "page_sha256": "0" * 64}
+        page_b = dict(page_a, page_sha256="1" * 64)
+        self.assertEqual(d.subject_identity(page_a), d.subject_identity(page_b))   # hash は identity でない
+        self.assertNotEqual(d.subject_identity(page_a), d.subject_identity(dict(page_a, page_path="wiki/b.md")))
+
+    def test_cross_task_terminal_refused(self):
+        oid_a = self._task_opp("task-A", "r1")
+        self._task_opp("task-B", "r2")
+        before = len(list(d.events_dir(self.root).glob("*.json")))
+        with self.assertRaises(d.DistillError) as cm:
+            d.cmd_note(self.root, "completed", distill_id=None, task_id="task-B", trigger_source="scheduled",
+                       trigger_ref=None, opportunity_id=oid_a, block_kind=None, source="host-task",
+                       strength="observed", reason=None, task_metadata=None, unverifiable_reason=None, actor="h")
+        self.assertIn("subject", str(cm.exception))
+        self.assertEqual(len(list(d.events_dir(self.root).glob("*.json"))), before)
+
+    def test_validator_detects_cross_subject_terminal(self):
+        oid_a = self._task_opp("task-A", "r1")
+        rogue = d._base_event("completed", {"subject_type": "task", "task_id": "task-B"}, "host-task", "h",
+                              strength="observed")
+        rogue["opportunity_id"] = oid_a
+        d.write_event(self.root, rogue)          # CLI を迂回
+        self.assertEqual(d.cmd_validate(self.root), 2)
+
+    def test_cross_page_terminal_refused(self):
+        did = self._nominate()
+        d.cmd_note(self.root, "opportunity", distill_id=did, task_id=None, trigger_source="scheduled",
+                   trigger_ref="r1", opportunity_id=None, block_kind=None, source="host-task",
+                   strength="observed", reason=None, task_metadata=None, unverifiable_reason=None, actor="h")
+        oid = self._last("opportunity")["opportunity_id"]
+        with self.assertRaises(d.DistillError):
+            d.cmd_note(self.root, "completed", distill_id=None, task_id="task-X", trigger_source="scheduled",
+                       trigger_ref=None, opportunity_id=oid, block_kind=None, source="host-task",
+                       strength="observed", reason=None, task_metadata=None, unverifiable_reason=None, actor="h")
+
+
+class TestOpportunityIdUniqueness(DistillCase):
+    """V2-R4: opportunity_id は全体で一意。CLI が書く前に拒否し、validator も検出する。"""
+
+    def _opp(self, task_id, oid=None, ref="r"):
+        return d.cmd_note(self.root, "opportunity", distill_id=None, task_id=task_id,
+                          trigger_source="scheduled", trigger_ref=ref, opportunity_id=oid, block_kind=None,
+                          source="host-task", strength="observed", reason=None, task_metadata=None,
+                          unverifiable_reason=None, actor="h")
+
+    def test_duplicate_id_refused_by_cli(self):
+        oid = "op-20260101T000000Z-deadbeef"
+        self.assertEqual(self._opp("task-A", oid, "r1"), 0)
+        before = len(list(d.events_dir(self.root).glob("*.json")))
+        with self.assertRaises(d.DistillError) as cm:
+            self._opp("task-A", oid, "r2")
+        self.assertIn("opportunity_id", str(cm.exception))
+        self.assertEqual(len(list(d.events_dir(self.root).glob("*.json"))), before)
+
+    def test_validator_detects_duplicate_id(self):
+        oid = "op-20260101T000000Z-deadbeef"
+        self._opp("task-A", oid, "r1")
+        rogue = d._base_event("opportunity", {"subject_type": "task", "task_id": "task-A"}, "host-task", "h",
+                              strength="observed")
+        rogue.update(opportunity_id=oid,
+                     trigger={"trigger_source": "scheduled", "trigger_ref": "r2",
+                              "task_metadata_status": "unverifiable", "unverifiable_reason": "test"})
+        d.write_event(self.root, rogue)          # CLI を迂回
+        self.assertEqual(d.cmd_validate(self.root), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

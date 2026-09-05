@@ -296,6 +296,23 @@ def write_event(root: Path, ev: dict, *, retries: int = 3) -> Path:
     raise DistillError(f"event id collision after retries: {last}")
 
 
+def subject_identity(subject: dict | None) -> tuple:
+    """event 間で比較する subject の canonical identity（V2-R3）。
+
+    page は (type, distill_id, page_path)、task は (type, task_id)、skill は (type, slug)。
+    `page_sha256` は時点ごとに変わるので identity に含めない。
+    """
+    s = subject or {}
+    st = s.get("subject_type")
+    if st == "page":
+        return ("page", s.get("distill_id"), s.get("page_path"))
+    if st == "task":
+        return ("task", s.get("task_id"))
+    if st == "skill":
+        return ("skill", s.get("skill_slug"))
+    return ("unknown", json.dumps(s, sort_keys=True, ensure_ascii=False))
+
+
 def resolved_page(root: Path, rel: str | None) -> Path:
     """event に保存された page_path を **必ず resolver 経由で**開く（R2）。
 
@@ -460,6 +477,18 @@ def opportunity_counts(events: list[dict], *, window_days: int = DEFAULT_WINDOW_
     return out
 
 
+def assert_store_healthy(root: Path) -> list[dict]:
+    """**lock 内で**呼ぶ。event store に破損があれば書き込みを拒否し、健全なら valid events を返す（V2-R1）。
+
+    破損を放置したまま書くと、巻き戻った head の上に新しい event を積むことになり、
+    immutable store へ回復困難な不整合を足してしまう。
+    """
+    events, problems = scan_events(root)
+    if problems:
+        raise DistillError("event store が壊れています（先に修復してください）:\n  " + "\n  ".join(problems))
+    return events
+
+
 # ---------------------------------------------------------------------------
 # commands
 # ---------------------------------------------------------------------------
@@ -472,6 +501,7 @@ def cmd_nominate(root: Path, page: str, reason: str, actor: str | None = None) -
         raise DistillError(f"page not found: {page}")
     rel = page_path.resolve().relative_to(Path(root).resolve()).as_posix()
     with VaultLock(root):
+        events = assert_store_healthy(root)   # V2-R1: frontmatter を触る前に store の健全性を確認する
         fm = read_frontmatter(page_path)
         # review 済みであることは人が付ける（自動付与しない）
         for k in ("trust", "distill_reviewed_by", "distill_reviewed_at"):
@@ -497,7 +527,6 @@ def cmd_nominate(root: Path, page: str, reason: str, actor: str | None = None) -
             raise DistillError(f"{rel}: 蒸留対象の要件を満たしません:\n  " + "\n  ".join(problems))
         subject = {"subject_type": "page", "distill_id": did, "page_path": rel,
                    "page_sha256": sha256_file(page_path)}
-        events = load_events(root)
         state, head = state_head(events, did)
         if state == "nominated":
             raise DistillError(f"{did} は既に nominated です")
@@ -528,7 +557,7 @@ def cmd_decide(root: Path, distill_id: str, new_state: str, reason: str, actor: 
     if not reason.strip():
         raise DistillError("--reason は必須です（decision は理由と共に記録する）")
     with VaultLock(root):
-        events = load_events(root)
+        events = assert_store_healthy(root)
         state, head = state_head(events, distill_id)
         if state != "nominated":
             raise DistillError(f"{distill_id} の state は {state}（decision は nominated からのみ）")
@@ -593,17 +622,20 @@ def cmd_note(root: Path, event_type: str, *, distill_id: str | None, task_id: st
                 raise DistillError("blocked には --block-kind が必要です")
             ev["block_kind"] = block_kind
     with VaultLock(root):
-        # R5: immutable store へ書く前に、lock 内で先行 opportunity と terminal 重複を検査する
-        events = load_events(root)
-        if event_type in ("invoked",) + TERMINAL_EVENTS:
+        # R5/V2-R1: 破損 store では書かない。先行 opportunity・subject 整合・terminal 重複・ID 一意性を書く前に検査
+        events = assert_store_healthy(root)
+        if event_type == "opportunity":
+            if any(e.get("opportunity_id") == ev["opportunity_id"] and e.get("event_type") == "opportunity"
+                   for e in events):
+                raise DistillError(f"opportunity_id が既に存在します: {ev['opportunity_id']}（V2-R4: 全体で一意）")
+        else:
             opp = next((e for e in events
                         if e.get("event_type") == "opportunity" and e.get("opportunity_id") == ev["opportunity_id"]), None)
             if opp is None:
                 raise DistillError(f"先行 opportunity が見つかりません: {ev['opportunity_id']}")
-            if (opp.get("subject") or {}) != {k: v for k, v in subject.items() if k != "page_sha256"} and \
-                    (opp.get("subject") or {}).get("distill_id") != subject.get("distill_id") and \
-                    (opp.get("subject") or {}).get("task_id") != subject.get("task_id"):
-                raise DistillError("先行 opportunity と subject が一致しません")
+            if subject_identity(opp.get("subject")) != subject_identity(subject):
+                raise DistillError(f"先行 opportunity と subject が一致しません: "
+                                   f"{subject_identity(opp.get('subject'))} != {subject_identity(subject)}")
             if event_type in TERMINAL_EVENTS:
                 existing = [e["event_type"] for e in events
                             if e.get("event_type") in TERMINAL_EVENTS and e.get("opportunity_id") == ev["opportunity_id"]]
@@ -632,21 +664,25 @@ def derive_trigger_ref(task_id: str, fire_time_utc: str, host: str) -> str:
 
 def cmd_status(root: Path, distill_id: str | None = None, window_days: int = DEFAULT_WINDOW_DAYS,
                min_opportunities: int = DEFAULT_MIN_OPPORTUNITIES) -> int:
-    """read-only。state を変えない。"""
-    events = load_events(root)
+    """read-only。state を変えない。store が壊れていれば警告し rc=2（巻き戻った state を正常に見せない）。"""
+    events, load_problems = scan_events(root)
+    if load_problems:
+        print("WARNING: event store に問題があります（表示中の state は不完全です）:", file=sys.stderr)
+        for p in load_problems:
+            print(f"  {p}", file=sys.stderr)
     states = candidate_states(events)
     counts = opportunity_counts(events, window_days=window_days)
     if distill_id:
         if distill_id not in states:
             print(f"unknown distill_id: {distill_id}")
-            return 1
+            return 2 if load_problems else 1
         s = states[distill_id]
         print(f"{distill_id}: state={s['state']} page={s.get('page_path')} head={s.get('head_event_id')}")
         print(f"  opportunities({window_days}d, counted): {len(counts.get(distill_id, []))}")
         for ev in events:
             if (ev.get("subject") or {}).get("distill_id") == distill_id:
                 print(f"  {ev['occurred_at']} {ev['event_type']:11s} {ev.get('new_state') or ''}")
-        return 0
+        return 2 if load_problems else 0
     print(f"events: {len(events)} | candidates: {len(states)}")
     for did in sorted(states):
         s = states[did]
@@ -655,7 +691,7 @@ def cmd_status(root: Path, distill_id: str | None = None, window_days: int = DEF
         print(f"  {did}  {s['state']:9s}  opp({window_days}d)={n}  {s.get('page_path') or '-'}{flag}")
     ready = [d for d, ids in counts.items() if len(ids) >= min_opportunities and states.get(d, {}).get("state") == "absent"]
     print(f"蒸留候補: {len(ready)}件")
-    return 0
+    return 2 if load_problems else 0
 
 
 def cmd_validate(root: Path, *, strict_index: bool = True) -> int:
@@ -664,11 +700,16 @@ def cmd_validate(root: Path, *, strict_index: bool = True) -> int:
     events, load_problems = scan_events(root)
     problems += [f"event store: {p}" for p in load_problems]
     seen_ids = set()
+    valid = []          # V2-R2: schema を通った event だけを cross-event invariant の計算へ渡す
     for ev in events:
-        problems += [f"{ev.get('event_id')}: {p}" for p in validate_event(ev)]
+        eprobs = validate_event(ev)
+        problems += [f"{ev.get('event_id')}: {p}" for p in eprobs]
         if ev["event_id"] in seen_ids:
             problems.append(f"duplicate event_id: {ev['event_id']}")
         seen_ids.add(ev["event_id"])
+        if not eprobs:
+            valid.append(ev)
+    events = valid
     # 遷移の連鎖: chain を辿り、head 束縛（id と hash）と state 整合を検査
     by_id = {ev["event_id"]: ev for ev in events}
     all_dids = {(ev.get("subject") or {}).get("distill_id") for ev in events}
@@ -694,17 +735,33 @@ def cmd_validate(root: Path, *, strict_index: bool = True) -> int:
                 elif prev.get("_sha256") != ev.get("previous_event_sha256"):
                     problems.append(f"{ev['event_id']}: previous_event_sha256 が実ファイルと不一致")
             cur = ev.get("new_state")
-    # 1 opportunity に terminal は最大1つ
-    terminal = {}
-    opp_ids = {ev["opportunity_id"] for ev in events if ev.get("event_type") == "opportunity"}
+    # opportunity ID の一意性（V2-R4）・terminal 最大1つ・先行 opportunity・subject 整合（V2-R3）
+    opp_by_id = {}
     for ev in events:
+        if ev.get("event_type") != "opportunity":
+            continue
+        oid = ev.get("opportunity_id")
+        if oid in opp_by_id:
+            problems.append(f"duplicate opportunity_id: {oid}（{opp_by_id[oid]['event_id']} と {ev['event_id']}）")
+            continue
+        opp_by_id[oid] = ev
+    terminal = {}
+    for ev in events:
+        if ev.get("event_type") not in ("invoked",) + TERMINAL_EVENTS:
+            continue
+        oid = ev.get("opportunity_id")
+        opp = opp_by_id.get(oid)
+        if opp is None:
+            problems.append(f"{ev['event_id']}: 先行 opportunity が存在しません（{oid}）")
+            continue
+        if subject_identity(opp.get("subject")) != subject_identity(ev.get("subject")):
+            problems.append(f"{ev['event_id']}: 先行 opportunity {oid} と subject が一致しません "
+                            f"（{subject_identity(opp.get('subject'))} != {subject_identity(ev.get('subject'))}）")
         if ev.get("event_type") in TERMINAL_EVENTS:
-            oid = ev.get("opportunity_id")
             if oid in terminal:
                 problems.append(f"opportunity {oid}: terminal が複数（{terminal[oid]} と {ev['event_type']}）")
-            terminal[oid] = ev["event_type"]
-        if ev.get("event_type") in ("invoked",) + TERMINAL_EVENTS and ev.get("opportunity_id") not in opp_ids:
-            problems.append(f"{ev['event_id']}: 先行 opportunity が存在しません（{ev.get('opportunity_id')}）")
+            else:
+                terminal[oid] = ev["event_type"]
     # 派生 index は再生成と一致するか（C-03）
     idx = distill_dir(root) / "_index.md"
     if strict_index and idx.exists():
