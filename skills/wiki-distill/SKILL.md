@@ -70,7 +70,13 @@ python core/distill.py validate    # event 集合と派生 index の invariant �
 head hash の一致、1 opportunity に terminal 最大1つ、先行 opportunity の存在、index が再生成結果と一致するか、
 参照ページの実在。**`distill/_index.md` は派生物なので手で編集しない**（validate が不一致を報告する）。
 
-## 6. やらないこと
+## 6. lock 境界
+
+書き込みは**すべて CLI 経由**で、CLI が Vault lock を取ってから event を exclusive create する。
+エージェントが event ファイル・`distill/_index.md` を直接書くことは lock対象外の危険な操作なので行わない
+（Wikiページ本文の編集も同様に lock対象外——本文を直す場合は保存直前に再読込して衝突を確かめる）。
+
+## 7. やらないこと
 
 - 人の指名なしに候補を進めること（`observed` は閾値到達の自動記録だけで、そこから先は必ず人）
 - `distill/_index.md` の手書き、event ファイルの編集・削除（event は immutable）
