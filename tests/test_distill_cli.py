@@ -700,7 +700,9 @@ class TestValidateEventIsTotal(DistillCase):
                     {"event_type": "decision", "subject": [1, 2]},
                     {"event_type": "opportunity", "subject": None},
                     {"event_type": "completed", "opportunity_id": 5, "subject": {"subject_type": "task"}},
-                    {"event_type": 42, "subject": {}}, {"x": "y"}):
+                    {"event_type": 42, "subject": {}}, {"x": "y"},
+                    {"event_type": [], "subject": {}}, {"event_type": {"a": 1}, "subject": {}},
+                    {"event_type": "nominated", "subject": {}, "occurred_at": 7}):
             with self.subTest(obj=obj):
                 problems = d.validate_event(obj)     # 例外を出さない
                 self.assertTrue(problems, f"問題を返すべき: {obj}")
@@ -804,6 +806,22 @@ class TestSchemaInvalidBlocksEverything(DistillCase):
         "non_object": (b"[]", "20260101T000000Z-deadbee2"),
         "schema_invalid": (b'{"event_id":"20260101T000000Z-deadbee3","event_type":"opportunity"}',
                            "20260101T000000Z-deadbee3"),
+        "event_type_is_list": (b'{"event_id":"20260101T000000Z-deadbee8","occurred_at":"2026-01-01T00:00:00Z",'
+                               b'"event_type":[],"subject":{},"source":"human","strength":"observed","actor":"t"}',
+                               "20260101T000000Z-deadbee8"),
+        "event_type_is_object": (b'{"event_id":"20260101T000000Z-deadbee9","occurred_at":"2026-01-01T00:00:00Z",'
+                                 b'"event_type":{"a":1},"subject":{},"source":"human","strength":"observed",'
+                                 b'"actor":"t"}', "20260101T000000Z-deadbee9"),
+        "occurred_at_is_number": (b'{"event_id":"20260101T000000Z-deadbeea","occurred_at":7,'
+                                  b'"event_type":"opportunity","subject":{"subject_type":"task","task_id":"t"},'
+                                  b'"source":"host-task","strength":"observed","actor":"h",'
+                                  b'"opportunity_id":"op-20260101T000000Z-deadbeea"}',
+                                  "20260101T000000Z-deadbeea"),
+        "occurred_at_is_list": (b'{"event_id":"20260101T000000Z-deadbeeb","occurred_at":[1],'
+                                b'"event_type":"opportunity","subject":{"subject_type":"task","task_id":"t"},'
+                                b'"source":"host-task","strength":"observed","actor":"h",'
+                                b'"opportunity_id":"op-20260101T000000Z-deadbeeb"}',
+                                "20260101T000000Z-deadbeeb"),
         "subject_is_string": (b'{"event_id":"20260101T000000Z-deadbee5","occurred_at":"2026-01-01T00:00:00Z",'
                               b'"event_type":"nominated","subject":"bad","source":"human","strength":"observed",'
                               b'"actor":"t","reason":"r","expected_previous_state":"absent","new_state":"nominated"}',
@@ -894,6 +912,21 @@ class TestSchemaInvalidBlocksEverything(DistillCase):
         with self.assertRaises(d.DistillError):
             d.cmd_reindex(self.root)
         self.assertFalse(idx.exists(), "破損 store の valid subset で index を作り直さない")
+
+    def test_mixed_occurred_at_types_do_not_break_sorting(self):
+        """正常 event（string）と型違い（number/list）が共存しても sort/診断が落ちない（V5-R1）。"""
+        did = self._nominate()
+        self._break("occurred_at_is_number")
+        self._break("occurred_at_is_list")
+        before = self._snapshot()
+        events, problems = d.store_health(self.root)      # 例外を出さない
+        self.assertTrue(problems)
+        self.assertEqual(len(events), 2, "正常な2件だけが validated として返る")
+        self.assertEqual(d.cmd_status(self.root), 2)
+        self.assertEqual(d.cmd_validate(self.root), 2)
+        with self.assertRaises(d.DistillError):
+            d.cmd_decide(self.root, did, "accepted", "r", actor="t")
+        self.assertEqual(self._snapshot(), before)
 
     def test_healthy_store_still_works(self):
         did = self._nominate()

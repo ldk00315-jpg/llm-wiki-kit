@@ -232,7 +232,11 @@ def scan_events(root: Path) -> tuple[list[dict], list[str]]:
             continue
         ev["_sha256"] = sha256_bytes(raw)
         out.append(ev)
-    out.sort(key=lambda e: (e.get("occurred_at", ""), e.get("event_id", "")))
+    # V5-R1: 未検証の raw 値を比較しない。sort key は必ず (str, str) へ正規化する
+    def _key(e):
+        at, eid = e.get("occurred_at"), e.get("event_id")
+        return (at if isinstance(at, str) else "", eid if isinstance(eid, str) else "")
+    out.sort(key=_key)
     return out, problems
 
 
@@ -267,6 +271,8 @@ def validate_event(ev: dict) -> list[str]:
         problems.append("subject が object ではありません")
         subject = {}
     et = ev.get("event_type")
+    if not isinstance(et, str):       # V5-R1: list/dict は unhashable。membership 検査の前に型を確かめる
+        return problems + ["event_type が文字列ではありません"]
     if et in TRANSITIONS:
         rule = TRANSITIONS[et]
         if ev.get("source") != rule["source"]:
