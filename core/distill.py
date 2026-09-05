@@ -244,6 +244,8 @@ def load_events(root: Path) -> list[dict]:
 def validate_event(ev: dict) -> list[str]:
     """schema（あれば jsonschema）＋遷移表による検証。jsonschema 不在でも最低限は検査する。"""
     problems = []
+    if not isinstance(ev, dict):      # V4-R1: 非 object でも例外を出さない
+        return ["event is not an object"]
     payload = {k: v for k, v in ev.items() if not k.startswith("_")}   # _sha256 等の内部注釈は除く
     try:
         import jsonschema  # noqa: F401
@@ -256,6 +258,14 @@ def validate_event(ev: dict) -> list[str]:
                 problems.append(f"missing field: {k}")
         if not EVENT_ID_RE.match(str(ev.get("event_id", ""))):
             problems.append("event_id format")
+    # 以降は「任意の JSON object」に対して total であること（V4-R1）。
+    # field の型が壊れていても例外を出さず、必ず problems を返す
+    if not isinstance(ev, dict):
+        return problems + ["event is not an object"]
+    subject = ev.get("subject")
+    if not isinstance(subject, dict):
+        problems.append("subject が object ではありません")
+        subject = {}
     et = ev.get("event_type")
     if et in TRANSITIONS:
         rule = TRANSITIONS[et]
@@ -265,8 +275,19 @@ def validate_event(ev: dict) -> list[str]:
             problems.append(f"{et}: expected_previous_state must be one of {rule['from']}")
         if ev.get("new_state") not in rule["to"]:
             problems.append(f"{et}: new_state must be one of {rule['to']}")
-        if (ev.get("subject") or {}).get("subject_type") != "page":
+        if subject.get("subject_type") != "page":
             problems.append(f"{et}: candidate state events require subject_type=page")
+        for k in ("distill_id", "page_path", "page_sha256"):
+            if not isinstance(subject.get(k), str) or not subject.get(k):
+                problems.append(f"{et}: subject.{k} が必要です")
+    elif et in ("invoked",) + TERMINAL_EVENTS:
+        if not isinstance(ev.get("opportunity_id"), str):
+            problems.append(f"{et}: opportunity_id が必要です")
+    elif et == "opportunity":
+        if not isinstance(ev.get("opportunity_id"), str):
+            problems.append("opportunity: opportunity_id が必要です")
+        if not isinstance(ev.get("trigger"), dict):
+            problems.append("opportunity: trigger が object ではありません")
     return problems
 
 
@@ -488,9 +509,13 @@ def store_health(root: Path) -> tuple[list[dict], list[str]]:
     1件でもあれば、その store の上に新しい event を積んではいけないし、派生物も作り直さない。
     """
     events, problems = scan_events(root)
+    valid = []
     for ev in events:
-        problems += [f"{ev.get('event_id')}: {p}" for p in validate_event(ev)]
-    return events, problems
+        eprobs = validate_event(ev)
+        problems += [f"{ev.get('event_id')}: {p}" for p in eprobs]
+        if not eprobs:
+            valid.append(ev)          # V4-R1: 状態計算へ渡すのは検証を通ったものだけ
+    return valid, problems
 
 
 def assert_store_healthy(root: Path) -> list[dict]:
@@ -681,9 +706,11 @@ def derive_trigger_ref(task_id: str, fire_time_utc: str, host: str) -> str:
 def cmd_status(root: Path, distill_id: str | None = None, window_days: int = DEFAULT_WINDOW_DAYS,
                min_opportunities: int = DEFAULT_MIN_OPPORTUNITIES) -> int:
     """read-only。state を変えない。store が壊れていれば警告し rc=2（巻き戻った state を正常に見せない）。"""
-    events, load_problems = store_health(root)      # V3-R1: load 診断＋schema/遷移の両方
+    # V4-R1: 計算に使うのは validated events だけ。診断があれば表示して rc=2（不正 event を state へ混ぜない）
+    events, load_problems = store_health(root)
     if load_problems:
-        print("WARNING: event store に問題があります（表示中の state は不完全です）:", file=sys.stderr)
+        print("WARNING: event store に問題があります（表示中の state は検証を通った event だけで計算しています）:",
+              file=sys.stderr)
         for p in load_problems:
             print(f"  {p}", file=sys.stderr)
     states = candidate_states(events)
@@ -713,17 +740,8 @@ def cmd_status(root: Path, distill_id: str | None = None, window_days: int = DEF
 def cmd_validate(root: Path, *, strict_index: bool = True) -> int:
     """event 集合と派生 index の invariant を検査（単一 schema では表せない分・契約 §10）。"""
     problems = []
-    events, health_problems = store_health(root)    # store_health と同じ定義を使う（分岐させない）
+    events, health_problems = store_health(root)    # validated events ＋ 全診断（定義は1箇所）
     problems += health_problems
-    seen_ids = set()
-    valid = []          # V2-R2: schema を通った event だけを cross-event invariant の計算へ渡す
-    for ev in events:
-        if ev["event_id"] in seen_ids:
-            problems.append(f"duplicate event_id: {ev['event_id']}")
-        seen_ids.add(ev["event_id"])
-        if not validate_event(ev):
-            valid.append(ev)
-    events = valid
     # 遷移の連鎖: chain を辿り、head 束縛（id と hash）と state 整合を検査
     by_id = {ev["event_id"]: ev for ev in events}
     all_dids = {(ev.get("subject") or {}).get("distill_id") for ev in events}

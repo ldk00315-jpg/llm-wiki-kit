@@ -692,6 +692,30 @@ class TestValidatorNeverRaises(DistillCase):
         self.assertEqual(d.cmd_validate(self.root), 2)
 
 
+class TestValidateEventIsTotal(DistillCase):
+    """V4-R1: validate_event は任意の JSON object に対して例外を出さず problems を返す。"""
+
+    def test_never_raises_on_arbitrary_objects(self):
+        for obj in ({}, {"event_type": "nominated", "subject": "bad"},
+                    {"event_type": "decision", "subject": [1, 2]},
+                    {"event_type": "opportunity", "subject": None},
+                    {"event_type": "completed", "opportunity_id": 5, "subject": {"subject_type": "task"}},
+                    {"event_type": 42, "subject": {}}, {"x": "y"}):
+            with self.subTest(obj=obj):
+                problems = d.validate_event(obj)     # 例外を出さない
+                self.assertTrue(problems, f"問題を返すべき: {obj}")
+
+    def test_non_dict_input(self):
+        for obj in ("string", [1], 3, None):
+            with self.subTest(obj=obj):
+                self.assertTrue(d.validate_event(obj))
+
+    def test_valid_event_has_no_problems(self):
+        self._nominate()
+        for ev in self._events():
+            self.assertEqual(d.validate_event({k: v for k, v in ev.items() if not k.startswith("_")}), [], ev)
+
+
 class TestSubjectIdentity(DistillCase):
     """V2-R3: subject の canonical identity を CLI guard と validator が同じ規則で使う。"""
 
@@ -780,6 +804,20 @@ class TestSchemaInvalidBlocksEverything(DistillCase):
         "non_object": (b"[]", "20260101T000000Z-deadbee2"),
         "schema_invalid": (b'{"event_id":"20260101T000000Z-deadbee3","event_type":"opportunity"}',
                            "20260101T000000Z-deadbee3"),
+        "subject_is_string": (b'{"event_id":"20260101T000000Z-deadbee5","occurred_at":"2026-01-01T00:00:00Z",'
+                              b'"event_type":"nominated","subject":"bad","source":"human","strength":"observed",'
+                              b'"actor":"t","reason":"r","expected_previous_state":"absent","new_state":"nominated"}',
+                              "20260101T000000Z-deadbee5"),
+        "subject_is_list": (b'{"event_id":"20260101T000000Z-deadbee6","occurred_at":"2026-01-01T00:00:00Z",'
+                            b'"event_type":"decision","subject":[1,2],"source":"human","strength":"observed",'
+                            b'"actor":"t","reason":"r","expected_previous_state":"nominated","new_state":"held"}',
+                            "20260101T000000Z-deadbee6"),
+        "new_state_missing": (b'{"event_id":"20260101T000000Z-deadbee7","occurred_at":"2026-01-01T00:00:00Z",'
+                              b'"event_type":"nominated","subject":{"subject_type":"page","distill_id":"d-00000001",'
+                              b'"page_path":"wiki/x.md","page_sha256":"' + b"a" * 64 + b'"},"source":"human",'
+                              b'"strength":"observed","actor":"t","reason":"r",'
+                              b'"expected_previous_state":"absent"}',
+                              "20260101T000000Z-deadbee7"),
         "transition_invalid": (b'{"event_id":"20260101T000000Z-deadbee4","occurred_at":"2026-01-01T00:00:00Z",'
                                b'"event_type":"nominated","subject":{"subject_type":"page","distill_id":"d-00000001",'
                                b'"page_path":"wiki/x.md","page_sha256":"' + b"a" * 64 + b'"},"source":"human",'
