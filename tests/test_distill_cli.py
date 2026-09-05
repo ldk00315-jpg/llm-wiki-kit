@@ -939,5 +939,160 @@ class TestSchemaInvalidBlocksEverything(DistillCase):
         self.assertEqual(d.cmd_decide(self.root, did, "accepted", "ok", actor="t"), 0)
 
 
+class _NoJsonschema:
+    """jsonschema を import 不能にする context manager（V6-R1 の検証用）。"""
+
+    def __enter__(self):
+        import builtins
+        self._real = builtins.__import__
+
+        def fake(name, *a, **kw):
+            if name == "jsonschema" or name.startswith("jsonschema."):
+                raise ImportError("forced: jsonschema unavailable")
+            return self._real(name, *a, **kw)
+        builtins.__import__ = fake
+        return self
+
+    def __exit__(self, *exc):
+        import builtins
+        builtins.__import__ = self._real
+
+
+def _valid_nominated(page_sha="a" * 64):
+    return {"event_id": "20260101T000000Z-deadbee0", "occurred_at": "2026-01-01T00:00:00Z",
+            "event_type": "nominated",
+            "subject": {"subject_type": "page", "distill_id": "d-00000001",
+                        "page_path": "wiki/x.md", "page_sha256": page_sha},
+            "source": "human", "strength": "observed", "actor": "t", "reason": "r",
+            "expected_previous_state": "absent", "new_state": "nominated"}
+
+
+def _valid_opportunity():
+    return {"event_id": "20260101T000000Z-deadbee1", "occurred_at": "2026-01-01T00:00:00Z",
+            "event_type": "opportunity",
+            "subject": {"subject_type": "task", "task_id": "t1"},
+            "source": "host-task", "strength": "observed", "actor": "h",
+            "opportunity_id": "op-20260101T000000Z-deadbee1",
+            "trigger": {"trigger_source": "scheduled", "trigger_ref": "r1",
+                        "task_metadata_status": "unverifiable", "unverifiable_reason": "no adapter"}}
+
+
+class TestValidationWithoutJsonschema(DistillCase):
+    """V6-R1: jsonschema 不在でも schema-invalid を healthy にしない（built-in validation が正本）。"""
+
+    SINGLE_VIOLATIONS = {
+        "occurred_at_number": lambda e: e.update(occurred_at=7),
+        "occurred_at_list": lambda e: e.update(occurred_at=[1]),
+        "occurred_at_object": lambda e: e.update(occurred_at={"a": 1}),
+        "occurred_at_bad_format": lambda e: e.update(occurred_at="2026-01-01 00:00:00"),
+        "unknown_event_type": lambda e: e.update(event_type="promoted"),
+        "bad_source": lambda e: e.update(source="robot"),
+        "bad_strength": lambda e: e.update(strength="very-sure"),
+        "bad_event_id": lambda e: e.update(event_id="not-an-id"),
+        "unknown_field": lambda e: e.update(extra="x"),
+        "subject_missing_field": lambda e: e["subject"].pop("page_sha256"),
+        "subject_extra_field": lambda e: e["subject"].update(task_id="t"),
+        "bad_page_sha": lambda e: e["subject"].update(page_sha256="zz"),
+        "bad_page_path": lambda e: e["subject"].update(page_path="../escape.md"),
+        "state_without_reason": lambda e: e.pop("reason"),
+        "absent_with_previous": lambda e: e.update(previous_event_id="20260101T000000Z-deadbeef",
+                                                   previous_event_sha256="b" * 64),
+    }
+    OPP_VIOLATIONS = {
+        "trigger_missing_ref": lambda e: e["trigger"].pop("trigger_ref"),
+        "trigger_empty_ref": lambda e: e["trigger"].update(trigger_ref=""),
+        "trigger_bad_source": lambda e: e["trigger"].update(trigger_source="whenever"),
+        "snapshot_without_metadata": lambda e: (e["trigger"].update(task_metadata_status="snapshot"),
+                                                e["trigger"].pop("unverifiable_reason")),
+        "unverifiable_with_metadata": lambda e: e["trigger"].update(task_metadata={"a": 1}),
+        "opportunity_without_id": lambda e: e.pop("opportunity_id"),
+        "opportunity_with_system_source": lambda e: e.update(source="system"),
+        "trigger_not_object": lambda e: e.update(trigger="x"),
+    }
+
+    def test_single_violations_detected_without_jsonschema(self):
+        with _NoJsonschema():
+            self.assertEqual(d.validate_event(_valid_nominated()), [], "正常 event は問題なし")
+            self.assertEqual(d.validate_event(_valid_opportunity()), [])
+            for name, mutate in self.SINGLE_VIOLATIONS.items():
+                with self.subTest(case=name):
+                    ev = _valid_nominated()
+                    mutate(ev)
+                    self.assertTrue(d.validate_event(ev), f"{name} を検出できていない")
+            for name, mutate in self.OPP_VIOLATIONS.items():
+                with self.subTest(case=name):
+                    ev = _valid_opportunity()
+                    mutate(ev)
+                    self.assertTrue(d.validate_event(ev), f"{name} を検出できていない")
+
+    def test_store_gate_without_jsonschema(self):
+        """jsonschema 不在で、occurred_at だけが不正な event を置いても全 verb がゼロ mutation で拒否する。"""
+        did = self._nominate()
+        ev = _valid_opportunity()
+        ev.update(event_id="20260101T000000Z-deadbeec", occurred_at=7,
+                  opportunity_id="op-20260101T000000Z-deadbeec")
+        (d.events_dir(self.root) / "20260101T000000Z-deadbeec.json").write_text(
+            json.dumps(ev, ensure_ascii=False), encoding="utf-8")
+        idx = d.distill_dir(self.root) / "_index.md"
+        before = (sorted(p.name for p in d.events_dir(self.root).glob("*.json")),
+                  idx.read_bytes(), self.page.read_bytes())
+        with _NoJsonschema():
+            events, problems = d.store_health(self.root)
+            self.assertTrue(problems, "jsonschema 不在でも problems を返すこと")
+            self.assertEqual(len(events), 2)
+            self.assertEqual(d.cmd_status(self.root), 2)
+            self.assertEqual(d.cmd_validate(self.root), 2)
+            for label, fn in (("decide", lambda: d.cmd_decide(self.root, did, "accepted", "r", actor="t")),
+                              ("reindex", lambda: d.cmd_reindex(self.root)),
+                              ("note", lambda: d.cmd_note(self.root, "opportunity", distill_id=did, task_id=None,
+                                                          trigger_source="scheduled", trigger_ref="r9",
+                                                          opportunity_id=None, block_kind=None, source="host-task",
+                                                          strength="observed", reason=None, task_metadata=None,
+                                                          unverifiable_reason=None, actor="h"))):
+                with self.subTest(verb=label), self.assertRaises(d.DistillError):
+                    fn()
+        after = (sorted(p.name for p in d.events_dir(self.root).glob("*.json")),
+                 idx.read_bytes(), self.page.read_bytes())
+        self.assertEqual(after, before)
+
+    def test_healthy_store_without_jsonschema_still_works(self):
+        did = self._nominate()
+        with _NoJsonschema():
+            self.assertEqual(d.cmd_status(self.root), 0)
+            self.assertEqual(d.cmd_validate(self.root), 0)
+            self.assertEqual(d.cmd_decide(self.root, did, "accepted", "ok", actor="t"), 0)
+
+
+@unittest.skipIf(__import__("importlib").util.find_spec("jsonschema") is None, "jsonschema not installed")
+class TestBuiltinMatchesSchema(DistillCase):
+    """built-in validation と jsonschema の判定が一致すること（drift 検出）。"""
+
+    def _corpus(self):
+        out = [("valid_nominated", _valid_nominated()), ("valid_opportunity", _valid_opportunity())]
+        for name, mutate in TestValidationWithoutJsonschema.SINGLE_VIOLATIONS.items():
+            ev = _valid_nominated()
+            mutate(ev)
+            out.append((name, ev))
+        for name, mutate in TestValidationWithoutJsonschema.OPP_VIOLATIONS.items():
+            ev = _valid_opportunity()
+            mutate(ev)
+            out.append((name, ev))
+        # 実際に生成される event も corpus に含める
+        self._nominate()
+        for ev in self._events():
+            out.append((f"generated_{ev['event_type']}", {k: v for k, v in ev.items() if not k.startswith("_")}))
+        return out
+
+    def test_builtin_and_schema_agree(self):
+        from jsonschema import Draft202012Validator as V
+        schema = json.loads((Path(d.SCHEMA_DIR) / "distill-event.schema.json").read_text(encoding="utf-8"))
+        for name, ev in self._corpus():
+            with self.subTest(case=name):
+                builtin_ok = not d.builtin_validate_event(ev)
+                schema_ok = not list(V(schema).iter_errors(ev))
+                self.assertEqual(builtin_ok, schema_ok,
+                                 f"{name}: built-in={builtin_ok} schema={schema_ok}（判定が食い違う）")
+
+
 if __name__ == "__main__":
     unittest.main()

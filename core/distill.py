@@ -47,6 +47,7 @@ CONTRACT_VERSION = "0.1"
 SCHEMA_DIR = Path(__file__).resolve().parent.parent / "schema" / "distill"
 
 EVENT_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
+UTC_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 OPPORTUNITY_ID_RE = re.compile(r"^op-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
 DISTILL_ID_RE = re.compile(r"^d-[0-9a-f]{8}$")
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,63}$")
@@ -245,55 +246,264 @@ def load_events(root: Path) -> list[dict]:
     return scan_events(root)[0]
 
 
-def validate_event(ev: dict) -> list[str]:
-    """schema（あれば jsonschema）＋遷移表による検証。jsonschema 不在でも最低限は検査する。"""
-    problems = []
-    if not isinstance(ev, dict):      # V4-R1: 非 object でも例外を出さない
+SOURCES = ("host-task", "agent-self-report", "human", "system")
+STRENGTHS = ("observed", "asserted", "unverifiable")
+BLOCK_KINDS = ("input_missing", "precondition_failed", "permission_pending",
+               "external_unavailable", "operator_cancelled")
+TRIGGER_SOURCES = ("scheduled", "run-now", "explicit-invocation", "manual-procedure")
+EVENT_TYPES = ("registered", "observed", "nominated", "decision", "opportunity", "invoked", "completed", "blocked")
+SUBJECT_TYPES = ("page", "task", "skill")
+# subject_type ごとの必須 / 禁止 field（schema の allOf と同じ規則）
+SUBJECT_RULES = {
+    "page": (("distill_id", "page_path", "page_sha256"), ("task_id", "skill_slug")),
+    "task": (("task_id",), ("distill_id", "page_path", "page_sha256", "skill_slug")),
+    "skill": (("skill_slug",), ("task_id", "page_path", "page_sha256")),
+}
+TOP_LEVEL_FIELDS = {"event_id", "occurred_at", "event_type", "subject", "source", "strength", "actor", "reason",
+                    "opportunity_id", "trigger", "block_kind", "previous_event_id", "previous_event_sha256",
+                    "expected_previous_state", "new_state", "threshold", "evidence"}
+TRIGGER_FIELDS = {"trigger_source", "trigger_ref", "task_metadata_status", "task_metadata",
+                  "partial_task_metadata", "unverifiable_reason"}
+# event_type ごとの禁止 field（schema の not/anyOf と同じ規則）
+FORBIDDEN_BY_TYPE = {
+    "registered": ("expected_previous_state", "new_state", "opportunity_id", "trigger", "threshold",
+                   "block_kind", "previous_event_id", "previous_event_sha256"),
+    "observed": ("opportunity_id", "trigger", "block_kind", "previous_event_id", "previous_event_sha256"),
+    "nominated": ("opportunity_id", "trigger", "threshold", "block_kind"),
+    "decision": ("opportunity_id", "trigger", "threshold", "block_kind"),
+    "opportunity": ("expected_previous_state", "new_state", "threshold", "block_kind",
+                    "previous_event_id", "previous_event_sha256"),
+    "invoked": ("expected_previous_state", "new_state", "trigger", "threshold", "block_kind",
+                "previous_event_id", "previous_event_sha256"),
+    "completed": ("expected_previous_state", "new_state", "trigger", "threshold", "block_kind",
+                  "previous_event_id", "previous_event_sha256"),
+    "blocked": ("expected_previous_state", "new_state", "trigger", "threshold",
+                "previous_event_id", "previous_event_sha256"),
+}
+
+
+def _is_str(v) -> bool:
+    return isinstance(v, str)
+
+
+def _nonempty_str(v) -> bool:
+    return isinstance(v, str) and v != ""
+
+
+def builtin_validate_event(ev) -> list[str]:
+    """`distill-event.schema.json` と同等の検証を標準ライブラリだけで行う（V6-R1）。
+
+    jsonschema はあれば **追加の** cross-check として使うが、健全性の判定はこちらが正本。
+    これにより「jsonschema が入っていない環境では schema-invalid が healthy になる」fail-open を無くす。
+    schema との等価性は tests/test_distill_cli.py の equivalence test が守る。
+    """
+    p: list[str] = []
+    if not isinstance(ev, dict):
         return ["event is not an object"]
+    # additionalProperties: false
+    for k in ev:
+        if k.startswith("_"):
+            continue
+        if k not in TOP_LEVEL_FIELDS:
+            p.append(f"未知の field: {k}")
+    for k in ("event_id", "occurred_at", "event_type", "subject", "source", "strength", "actor"):
+        if k not in ev:
+            p.append(f"必須 field がありません: {k}")
+    if "event_id" in ev and not (_is_str(ev["event_id"]) and EVENT_ID_RE.match(ev["event_id"])):
+        p.append("event_id の形式が不正です")
+    if "occurred_at" in ev and not (_is_str(ev["occurred_at"]) and UTC_RE.match(ev["occurred_at"])):
+        p.append("occurred_at の形式が不正です（YYYY-MM-DDTHH:MM:SSZ）")
+    et = ev.get("event_type")
+    if not _is_str(et) or et not in EVENT_TYPES:
+        p.append(f"event_type が不正です: {et!r}")
+        et = None
+    if "source" in ev and ev["source"] not in SOURCES:
+        p.append(f"source が不正です: {ev['source']!r}")
+    if "strength" in ev and ev["strength"] not in STRENGTHS:
+        p.append(f"strength が不正です: {ev['strength']!r}")
+    if "actor" in ev and not _nonempty_str(ev["actor"]):
+        p.append("actor は非空文字列である必要があります")
+    if "reason" in ev and not _nonempty_str(ev["reason"]):
+        p.append("reason は非空文字列である必要があります")
+    # subject
+    subject = ev.get("subject")
+    if not isinstance(subject, dict):
+        if "subject" in ev:
+            p.append("subject が object ではありません")
+        subject = {}
+    else:
+        st = subject.get("subject_type")
+        for k in subject:
+            if k not in {"subject_type", "distill_id", "page_path", "page_sha256", "task_id", "skill_slug"}:
+                p.append(f"subject に未知の field: {k}")
+        if st not in SUBJECT_TYPES:
+            p.append(f"subject.subject_type が不正です: {st!r}")
+        else:
+            required, forbidden = SUBJECT_RULES[st]
+            for k in required:
+                if k not in subject:
+                    p.append(f"subject.{k} が必要です（subject_type={st}）")
+            for k in forbidden:
+                if k in subject:
+                    p.append(f"subject.{k} は subject_type={st} では持てません")
+        if "distill_id" in subject and not (_is_str(subject["distill_id"]) and DISTILL_ID_RE.match(subject["distill_id"])):
+            p.append("subject.distill_id の形式が不正です")
+        if "page_path" in subject and not (_is_str(subject["page_path"]) and PORTABLE_PATH_RE.match(subject["page_path"])):
+            p.append("subject.page_path が portable path ではありません")
+        if "page_sha256" in subject and not (_is_str(subject["page_sha256"]) and SHA256_RE.match(subject["page_sha256"])):
+            p.append("subject.page_sha256 の形式が不正です")
+        if "task_id" in subject and not _nonempty_str(subject["task_id"]):
+            p.append("subject.task_id は非空文字列である必要があります")
+        if "skill_slug" in subject and not (_is_str(subject["skill_slug"]) and SLUG_RE.match(subject["skill_slug"])):
+            p.append("subject.skill_slug の形式が不正です")
+    # 共通 field の型
+    if "opportunity_id" in ev and not (_is_str(ev["opportunity_id"]) and OPPORTUNITY_ID_RE.match(ev["opportunity_id"])):
+        p.append("opportunity_id の形式が不正です")
+    if "block_kind" in ev and ev["block_kind"] not in BLOCK_KINDS:
+        p.append(f"block_kind が不正です: {ev['block_kind']!r}")
+    if "previous_event_id" in ev and not (_is_str(ev["previous_event_id"]) and EVENT_ID_RE.match(ev["previous_event_id"])):
+        p.append("previous_event_id の形式が不正です")
+    if "previous_event_sha256" in ev and not (_is_str(ev["previous_event_sha256"])
+                                              and SHA256_RE.match(ev["previous_event_sha256"])):
+        p.append("previous_event_sha256 の形式が不正です")
+    if "expected_previous_state" in ev and ev["expected_previous_state"] not in CANDIDATE_STATES:
+        p.append("expected_previous_state が不正です")
+    if "new_state" in ev and ev["new_state"] not in CANDIDATE_STATES[1:]:
+        p.append("new_state が不正です")
+    if "evidence" in ev:
+        if not isinstance(ev["evidence"], list):
+            p.append("evidence が配列ではありません")
+        else:
+            for i, ref in enumerate(ev["evidence"]):
+                if not isinstance(ref, dict) or set(ref) - {"path", "sha256"} or "path" not in ref or "sha256" not in ref:
+                    p.append(f"evidence[{i}] の形が不正です")
+                    continue
+                if not (_is_str(ref["path"]) and PORTABLE_PATH_RE.match(ref["path"])):
+                    p.append(f"evidence[{i}].path が portable path ではありません")
+                if not (_is_str(ref["sha256"]) and SHA256_RE.match(ref["sha256"])):
+                    p.append(f"evidence[{i}].sha256 の形式が不正です")
+    # threshold
+    if "threshold" in ev:
+        th = ev["threshold"]
+        if not isinstance(th, dict):
+            p.append("threshold が object ではありません")
+        else:
+            for k in th:
+                if k not in {"window_days", "min_opportunities", "counted_event_ids"}:
+                    p.append(f"threshold に未知の field: {k}")
+            for k in ("window_days", "min_opportunities"):
+                v = th.get(k)
+                if not isinstance(v, int) or isinstance(v, bool) or v < 1:
+                    p.append(f"threshold.{k} は1以上の整数である必要があります")
+            ids = th.get("counted_event_ids")
+            if not isinstance(ids, list) or not ids:
+                p.append("threshold.counted_event_ids は1件以上の配列である必要があります")
+            elif not all(_is_str(x) and EVENT_ID_RE.match(x) for x in ids):
+                p.append("threshold.counted_event_ids に不正な event_id があります")
+    # trigger
+    if "trigger" in ev:
+        tr = ev["trigger"]
+        if not isinstance(tr, dict):
+            p.append("trigger が object ではありません")
+        else:
+            for k in tr:
+                if k not in TRIGGER_FIELDS:
+                    p.append(f"trigger に未知の field: {k}")
+            for k in ("trigger_source", "trigger_ref", "task_metadata_status"):
+                if k not in tr:
+                    p.append(f"trigger.{k} が必要です")
+            if "trigger_source" in tr and tr["trigger_source"] not in TRIGGER_SOURCES:
+                p.append(f"trigger.trigger_source が不正です: {tr['trigger_source']!r}")
+            if "trigger_ref" in tr and not _nonempty_str(tr["trigger_ref"]):
+                p.append("trigger.trigger_ref は非空文字列である必要があります")
+            status = tr.get("task_metadata_status")
+            if status not in ("snapshot", "unverifiable"):
+                if "task_metadata_status" in tr:
+                    p.append(f"trigger.task_metadata_status が不正です: {status!r}")
+            elif status == "snapshot":
+                if not isinstance(tr.get("task_metadata"), dict) or not tr.get("task_metadata"):
+                    p.append("trigger.task_metadata が必要です（status=snapshot）")
+                for k in ("unverifiable_reason", "partial_task_metadata"):
+                    if k in tr:
+                        p.append(f"trigger.{k} は status=snapshot では持てません")
+            else:
+                if not _nonempty_str(tr.get("unverifiable_reason")):
+                    p.append("trigger.unverifiable_reason が必要です（status=unverifiable）")
+                if "task_metadata" in tr:
+                    p.append("trigger.task_metadata は status=unverifiable では持てません")
+            for k in ("task_metadata", "partial_task_metadata"):
+                if k in tr and (not isinstance(tr[k], dict) or not tr[k]):
+                    p.append(f"trigger.{k} は非空 object である必要があります")
+    if et is None:
+        return p
+    # event_type 別の必須 / 禁止 / source / subject_type
+    for k in FORBIDDEN_BY_TYPE.get(et, ()):
+        if k in ev:
+            p.append(f"{et}: {k} は持てません")
+    if et in TRANSITIONS:
+        rule = TRANSITIONS[et]
+        if ev.get("source") != rule["source"]:
+            p.append(f"{et}: source must be {rule['source']}")
+        if ev.get("strength") != "observed":
+            p.append(f"{et}: strength must be observed")
+        if ev.get("expected_previous_state") not in rule["from"]:
+            p.append(f"{et}: expected_previous_state must be one of {rule['from']}")
+        if ev.get("new_state") not in rule["to"]:
+            p.append(f"{et}: new_state must be one of {rule['to']}")
+        if subject.get("subject_type") != "page":
+            p.append(f"{et}: candidate state events require subject_type=page")
+        if et in ("nominated", "decision") and "reason" not in ev:
+            p.append(f"{et}: reason が必要です")
+        if et == "observed" and "threshold" not in ev:
+            p.append("observed: threshold が必要です")
+        if et == "decision" and not ("previous_event_id" in ev and "previous_event_sha256" in ev):
+            p.append("decision: previous_event_id と previous_event_sha256 が必要です")
+        if et == "nominated":
+            if ev.get("expected_previous_state") == "absent":
+                for k in ("previous_event_id", "previous_event_sha256"):
+                    if k in ev:
+                        p.append(f"nominated: absent からの遷移で {k} は持てません")
+            elif not ("previous_event_id" in ev and "previous_event_sha256" in ev):
+                p.append("nominated: absent 以外は previous_event_id と previous_event_sha256 が必要です")
+    elif et == "registered":
+        if ev.get("source") != "human":
+            p.append("registered: source must be human")
+        if ev.get("strength") != "observed":
+            p.append("registered: strength must be observed")
+        if subject.get("subject_type") != "page":
+            p.append("registered: subject_type must be page")
+        if "reason" not in ev:
+            p.append("registered: reason が必要です")
+    else:   # opportunity / invoked / completed / blocked
+        if ev.get("source") == "system":
+            p.append(f"{et}: source に system は使えません")
+        if "opportunity_id" not in ev:
+            p.append(f"{et}: opportunity_id が必要です")
+        if et == "opportunity" and "trigger" not in ev:
+            p.append("opportunity: trigger が必要です")
+        if et == "blocked" and "block_kind" not in ev:
+            p.append("blocked: block_kind が必要です")
+    return p
+
+
+def validate_event(ev) -> list[str]:
+    """event の検証。**built-in validation が正本**で、jsonschema があれば追加の cross-check として併用する。
+
+    どんな JSON 値に対しても例外を出さず problems を返す（total）。jsonschema の有無で
+    健全性の判定が変わらない（V6-R1: 不在環境で fail-open にしない）。
+    """
+    problems = builtin_validate_event(ev)
+    if not isinstance(ev, dict):
+        return problems
     payload = {k: v for k, v in ev.items() if not k.startswith("_")}   # _sha256 等の内部注釈は除く
     try:
-        import jsonschema  # noqa: F401
         from jsonschema import Draft202012Validator as V
         schema = json.loads((SCHEMA_DIR / "distill-event.schema.json").read_text(encoding="utf-8"))
         problems += [f"schema: {e.message}" for e in V(schema).iter_errors(payload)]
     except ImportError:
-        for k in ("event_id", "occurred_at", "event_type", "subject", "source", "strength", "actor"):
-            if k not in payload:
-                problems.append(f"missing field: {k}")
-        if not EVENT_ID_RE.match(str(ev.get("event_id", ""))):
-            problems.append("event_id format")
-    # 以降は「任意の JSON object」に対して total であること（V4-R1）。
-    # field の型が壊れていても例外を出さず、必ず problems を返す
-    if not isinstance(ev, dict):
-        return problems + ["event is not an object"]
-    subject = ev.get("subject")
-    if not isinstance(subject, dict):
-        problems.append("subject が object ではありません")
-        subject = {}
-    et = ev.get("event_type")
-    if not isinstance(et, str):       # V5-R1: list/dict は unhashable。membership 検査の前に型を確かめる
-        return problems + ["event_type が文字列ではありません"]
-    if et in TRANSITIONS:
-        rule = TRANSITIONS[et]
-        if ev.get("source") != rule["source"]:
-            problems.append(f"{et}: source must be {rule['source']}")
-        if ev.get("expected_previous_state") not in rule["from"]:
-            problems.append(f"{et}: expected_previous_state must be one of {rule['from']}")
-        if ev.get("new_state") not in rule["to"]:
-            problems.append(f"{et}: new_state must be one of {rule['to']}")
-        if subject.get("subject_type") != "page":
-            problems.append(f"{et}: candidate state events require subject_type=page")
-        for k in ("distill_id", "page_path", "page_sha256"):
-            if not isinstance(subject.get(k), str) or not subject.get(k):
-                problems.append(f"{et}: subject.{k} が必要です")
-    elif et in ("invoked",) + TERMINAL_EVENTS:
-        if not isinstance(ev.get("opportunity_id"), str):
-            problems.append(f"{et}: opportunity_id が必要です")
-    elif et == "opportunity":
-        if not isinstance(ev.get("opportunity_id"), str):
-            problems.append("opportunity: opportunity_id が必要です")
-        if not isinstance(ev.get("trigger"), dict):
-            problems.append("opportunity: trigger が object ではありません")
+        pass          # built-in が正本なので、不在でも検証は弱まらない
+    except (OSError, ValueError) as e:
+        problems.append(f"schema file を読めません: {type(e).__name__}")
     return problems
 
 
