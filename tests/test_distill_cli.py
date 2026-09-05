@@ -281,7 +281,7 @@ class TestIndexAndValidate(DistillCase):
         did = self._nominate()
         p = d.distill_dir(self.root) / "_index.md"
         first = p.read_text(encoding="utf-8")
-        d.reindex(self.root)
+        d.cmd_reindex(self.root)
         self.assertEqual(p.read_text(encoding="utf-8"), first)
         self.assertIn(did, first)
         self.assertEqual(d.cmd_validate(self.root), 0)
@@ -303,16 +303,19 @@ class TestIndexAndValidate(DistillCase):
         self.assertEqual(d.cmd_validate(self.root), 2)
 
     def test_validate_detects_double_terminal(self):
+        """CLI は2個目の terminal を拒否する（R5）ので、validator の検査は store を直接壊して行う。"""
         did = self._nominate()
         d.cmd_note(self.root, "opportunity", distill_id=did, task_id=None, trigger_source="scheduled",
                    trigger_ref="r1", opportunity_id=None, block_kind=None, source="host-task",
                    strength="observed", reason=None, task_metadata=None, unverifiable_reason=None, actor="h")
         oid = self._last("opportunity")["opportunity_id"]
-        for kind in ("completed", "blocked"):
-            kw = {"block_kind": "input_missing"} if kind == "blocked" else {"block_kind": None}
-            d.cmd_note(self.root, kind, distill_id=did, task_id=None, trigger_source="scheduled",
-                       trigger_ref=None, opportunity_id=oid, source="host-task", strength="observed",
-                       reason=None, task_metadata=None, unverifiable_reason=None, actor="h", **kw)
+        subj = self._last("opportunity")["subject"]
+        d.cmd_note(self.root, "completed", distill_id=did, task_id=None, trigger_source="scheduled",
+                   trigger_ref=None, opportunity_id=oid, block_kind=None, source="host-task",
+                   strength="observed", reason=None, task_metadata=None, unverifiable_reason=None, actor="h")
+        rogue = d._base_event("blocked", dict(subj), "host-task", "h", strength="observed")
+        rogue.update(opportunity_id=oid, block_kind="input_missing")
+        d.write_event(self.root, rogue)          # CLI を迂回して壊す
         self.assertEqual(d.cmd_validate(self.root), 2)
 
     def test_validate_detects_missing_page(self):
@@ -387,6 +390,225 @@ class TestResolver(DistillCase):
             self.skipTest("symlink creation not permitted")
         with self.assertRaises(d.DistillError):
             d.resolve_under_base(self.root, "wiki/escape/secret.md")
+
+
+class TestLoadDiagnostics(DistillCase):
+    """R1: 壊れた event file を validator から不可視にしない。"""
+
+    def _write_raw(self, name, raw: bytes):
+        d.events_dir(self.root).mkdir(parents=True, exist_ok=True)
+        (d.events_dir(self.root) / name).write_bytes(raw)
+
+    def test_invalid_json_is_reported(self):
+        self._nominate()
+        self._write_raw("20260101T000000Z-deadbeef.json", b"{")
+        events, problems = d.scan_events(self.root)
+        self.assertTrue(any("JSON" in p for p in problems), problems)
+        self.assertEqual(d.cmd_validate(self.root), 2)
+
+    def test_non_object_root_is_reported(self):
+        self._nominate()
+        self._write_raw("20260101T000000Z-deadbee0.json", b"[]")
+        self.assertTrue(any("object" in p for p in d.scan_events(self.root)[1]))
+        self.assertEqual(d.cmd_validate(self.root), 2)
+
+    def test_filename_mismatch_is_reported(self):
+        did = self._nominate()
+        ev = self._last("nominated")
+        src = d.events_dir(self.root) / f"{ev['event_id']}.json"
+        src.rename(d.events_dir(self.root) / "20260101T000000Z-cafebabe.json")   # 改名＝id 不一致
+        events, problems = d.scan_events(self.root)
+        self.assertTrue(any("filename" in p for p in problems), problems)
+        self.assertEqual(d.cmd_validate(self.root), 2)
+
+    def test_empty_store_is_clean(self):
+        events, problems = d.scan_events(self.root)
+        self.assertEqual((events, problems), ([], []))
+        self.assertEqual(d.cmd_validate(self.root), 0)
+
+    def test_stray_file_is_reported(self):
+        self._nominate()
+        self._write_raw("notes.txt", b"hello")
+        self.assertTrue(any("json" in p for p in d.scan_events(self.root)[1]))
+        self.assertEqual(d.cmd_validate(self.root), 2)
+
+
+class TestPageDrift(DistillCase):
+    """R4: nominate 後に本文が変わったら validator が drift として fail-closed にする。"""
+
+    def test_content_change_detected(self):
+        self._nominate()
+        self.assertEqual(d.cmd_validate(self.root), 0)
+        self.page.write_text(self.page.read_text(encoding="utf-8") + "\n3. 追記\n", encoding="utf-8")
+        self.assertEqual(d.cmd_validate(self.root), 2)
+
+    def test_decide_rebinds_hash_and_clears_drift(self):
+        did = self._nominate()
+        self.page.write_text(self.page.read_text(encoding="utf-8") + "\n3. 追記\n", encoding="utf-8")
+        self.assertEqual(d.cmd_validate(self.root), 2)
+        d.cmd_decide(self.root, did, "held", "内容更新を確認した", actor="t")   # 決定時点の内容を束縛し直す
+        self.assertEqual(d.cmd_validate(self.root), 0)
+
+    def test_missing_page_detected(self):
+        self._nominate()
+        self.page.unlink()
+        self.assertEqual(d.cmd_validate(self.root), 2)
+
+
+class TestResolverOnStoredPaths(DistillCase):
+    """R2: event に保存された page_path も、書き込み前に必ず resolver を通す。"""
+
+    def _swap_dir_for_symlink(self):
+        """nominate 後に concepts/ を Vault 外への symlink へ差し替える。"""
+        import shutil
+        outside = Path(self.tmp.name) / "outside"
+        outside.mkdir(exist_ok=True)
+        real = self.root / "wiki" / "concepts"
+        shutil.copy2(self.page, outside / self.page.name)
+        shutil.rmtree(real)
+        try:
+            os.symlink(str(outside), str(real), target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlink creation not permitted")
+
+    def test_decide_refuses_after_symlink_swap(self):
+        did = self._nominate()
+        self._swap_dir_for_symlink()
+        with self.assertRaises(d.DistillError):
+            d.cmd_decide(self.root, did, "accepted", "r", actor="t")
+        self.assertEqual(len([e for e in self._events() if e["event_type"] == "decision"]), 0)
+
+    def test_note_refuses_after_symlink_swap(self):
+        did = self._nominate()
+        self._swap_dir_for_symlink()
+        with self.assertRaises(d.DistillError):
+            d.cmd_note(self.root, "opportunity", distill_id=did, task_id=None, trigger_source="scheduled",
+                       trigger_ref="r1", opportunity_id=None, block_kind=None, source="host-task",
+                       strength="observed", reason=None, task_metadata=None, unverifiable_reason=None, actor="h")
+        self.assertEqual([e for e in self._events() if e["event_type"] == "opportunity"], [])
+
+
+class TestNoteGuards(DistillCase):
+    """R5: 先行 opportunity と terminal 重複は **書く前に** 拒否する。"""
+
+    def _opp(self, did):
+        d.cmd_note(self.root, "opportunity", distill_id=did, task_id=None, trigger_source="scheduled",
+                   trigger_ref="r1", opportunity_id=None, block_kind=None, source="host-task",
+                   strength="observed", reason=None, task_metadata=None, unverifiable_reason=None, actor="h")
+        return self._last("opportunity")["opportunity_id"]
+
+    def _terminal(self, did, oid, kind="completed", **kw):
+        return d.cmd_note(self.root, kind, distill_id=did, task_id=None, trigger_source="scheduled",
+                          trigger_ref=None, opportunity_id=oid, block_kind=kw.get("block_kind"),
+                          source="host-task", strength="observed", reason=None, task_metadata=None,
+                          unverifiable_reason=None, actor="h")
+
+    def test_second_terminal_refused_without_writing(self):
+        did = self._nominate()
+        oid = self._opp(did)
+        self._terminal(did, oid, "completed")
+        before = len(self._events())
+        with self.assertRaises(d.DistillError) as cm:
+            self._terminal(did, oid, "blocked", block_kind="input_missing")
+        self.assertIn("terminal", str(cm.exception))
+        self.assertEqual(len(self._events()), before, "immutable store に2個目を書いてはいけない")
+        self.assertEqual(d.cmd_validate(self.root), 0)
+
+    def test_unknown_opportunity_refused(self):
+        did = self._nominate()
+        with self.assertRaises(d.DistillError):
+            self._terminal(did, "op-20260101T000000Z-deadbeef", "completed")
+        self.assertEqual(d.cmd_validate(self.root), 0)
+
+    def test_invoked_then_completed_ok(self):
+        did = self._nominate()
+        oid = self._opp(did)
+        self.assertEqual(self._terminal(did, oid, "invoked"), 0)
+        self.assertEqual(self._terminal(did, oid, "completed"), 0)
+        self.assertEqual(d.cmd_validate(self.root), 0)
+
+
+class TestTriggerRefHost(DistillCase):
+    """R6: dedupe key の host は evidence の source enum ではなく host identity。"""
+
+    def test_different_hosts_do_not_collide(self):
+        a = d.derive_trigger_ref("task-1", "2026-09-05T06:02:35Z", "PC-A")
+        b = d.derive_trigger_ref("task-1", "2026-09-05T06:02:35Z", "PC-B")
+        self.assertNotEqual(a, b)
+
+    def test_cli_uses_host_identity_not_source(self):
+        did = self._nominate()
+        d.cmd_note(self.root, "opportunity", distill_id=did, task_id="t1", trigger_source="scheduled",
+                   trigger_ref=None, opportunity_id=None, block_kind=None, source="host-task",
+                   strength="observed", reason=None, task_metadata=None, unverifiable_reason=None,
+                   actor="h", host="PC-A")
+        ref_a = self._last("opportunity")["trigger"]["trigger_ref"]
+        self.assertNotEqual(ref_a, d.derive_trigger_ref("t1", d.now_utc(), "host-task"))
+        self.assertEqual(ref_a, d.derive_trigger_ref("t1", d.now_utc(), "PC-A"))
+
+    def test_future_events_excluded_from_window(self):
+        import datetime
+        did = self._nominate()
+        subj = self._last("nominated")["subject"]
+        ev = d._base_event("opportunity", dict(subj), "host-task", "h", strength="observed")
+        future = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=2)
+        ev.update(occurred_at=future.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  opportunity_id=d.new_opportunity_id(),
+                  trigger={"trigger_source": "scheduled", "trigger_ref": "future",
+                           "task_metadata_status": "unverifiable", "unverifiable_reason": "test"})
+        d.write_event(self.root, ev)
+        self.assertEqual(d.opportunity_counts(self._events()), {})
+
+
+class TestLockOnEveryMutation(DistillCase):
+    """R3: mutating verb は lock 中でだけ書く（standalone reindex も含む）。"""
+
+    def _hold_lock(self):
+        (self.root / ".lock").mkdir()
+        (self.root / ".lock" / "owner.json").write_text('{"token":"other"}', encoding="utf-8")
+
+    def _release(self):
+        import shutil
+        shutil.rmtree(self.root / ".lock", ignore_errors=True)
+
+    def test_reindex_requires_lock(self):
+        self._nominate()
+        idx = d.distill_dir(self.root) / "_index.md"
+        before = idx.read_text(encoding="utf-8")
+        idx.unlink()
+        self._hold_lock()
+        try:
+            with self.assertRaises(w.LockTimeout):
+                d.cmd_reindex(self.root)
+            self.assertFalse(idx.exists(), "lock を持たずに index を書いてはいけない")
+        finally:
+            self._release()
+        d.cmd_reindex(self.root)
+        self.assertEqual(idx.read_text(encoding="utf-8"), before)
+
+    def test_note_requires_lock(self):
+        did = self._nominate()
+        self._hold_lock()
+        try:
+            with self.assertRaises(w.LockTimeout):
+                d.cmd_note(self.root, "opportunity", distill_id=did, task_id=None, trigger_source="scheduled",
+                           trigger_ref="r1", opportunity_id=None, block_kind=None, source="host-task",
+                           strength="observed", reason=None, task_metadata=None,
+                           unverifiable_reason=None, actor="h")
+        finally:
+            self._release()
+        self.assertEqual([e for e in self._events() if e["event_type"] == "opportunity"], [])
+
+    def test_nominate_requires_lock(self):
+        p = self.root / "wiki" / "concepts" / "Second.md"
+        p.write_text(PAGE, encoding="utf-8")
+        self._hold_lock()
+        try:
+            with self.assertRaises(w.LockTimeout):
+                d.cmd_nominate(self.root, "wiki/concepts/Second.md", "r", actor="t")
+        finally:
+            self._release()
+        self.assertNotIn("distill_id", d.read_frontmatter(p))   # frontmatter も書かれない
 
 
 if __name__ == "__main__":

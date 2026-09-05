@@ -196,22 +196,49 @@ def set_frontmatter_values(text: str, values: dict) -> str:
 # event store
 # ---------------------------------------------------------------------------
 
-def load_events(root: Path) -> list[dict]:
-    """events/ の全 event を occurred_at, event_id 昇順で返す。壊れた file は例外にせず除外。"""
+def scan_events(root: Path) -> tuple[list[dict], list[str]]:
+    """(valid events, load diagnostics) を返す。
+
+    R1: 読めない / object でない / filename と event_id が食い違う file を**黙って捨てない**。
+    状態計算には valid だけを使い、validator は diagnostics も fail として扱う
+    （破損や改名を「event の消失」にすると head が巻き戻り、後続操作を許してしまう）。
+    """
     d = events_dir(root)
-    out = []
+    out, problems = [], []
     if not d.exists():
-        return out
-    for p in sorted(d.glob("*.json")):
-        try:
-            ev = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        return out, problems
+    for p in sorted(d.iterdir()):
+        if p.is_dir():
+            problems.append(f"{p.name}: events/ 直下の directory は許されません")
             continue
-        if isinstance(ev, dict) and ev.get("event_id") == p.stem:
-            ev["_sha256"] = sha256_file(p)
-            out.append(ev)
+        if p.suffix != ".json":
+            problems.append(f"{p.name}: events/ には .json だけを置きます")
+            continue
+        try:
+            raw = p.read_bytes()
+        except OSError as e:
+            problems.append(f"{p.name}: 読めません（{type(e).__name__}）")
+            continue
+        try:
+            ev = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as e:
+            problems.append(f"{p.name}: JSON として読めません（{type(e).__name__}）")
+            continue
+        if not isinstance(ev, dict):
+            problems.append(f"{p.name}: root が object ではありません")
+            continue
+        if ev.get("event_id") != p.stem:
+            problems.append(f"{p.name}: event_id {ev.get('event_id')!r} が filename と一致しません")
+            continue
+        ev["_sha256"] = sha256_bytes(raw)
+        out.append(ev)
     out.sort(key=lambda e: (e.get("occurred_at", ""), e.get("event_id", "")))
-    return out
+    return out, problems
+
+
+def load_events(root: Path) -> list[dict]:
+    """valid な event だけを返す（状態計算用）。診断が要る場面では scan_events を使う。"""
+    return scan_events(root)[0]
 
 
 def validate_event(ev: dict) -> list[str]:
@@ -267,6 +294,20 @@ def write_event(root: Path, ev: dict, *, retries: int = 3) -> Path:
             os.fsync(f.fileno())
         return p
     raise DistillError(f"event id collision after retries: {last}")
+
+
+def resolved_page(root: Path, rel: str | None) -> Path:
+    """event に保存された page_path を **必ず resolver 経由で**開く（R2）。
+
+    nominate 後に配下 directory が symlink / junction へ差し替わっても、
+    解決後 path が base 配下でなければここで fail-closed になる。
+    """
+    if not rel:
+        raise DistillError("page_path が空です")
+    p = resolve_under_base(root, rel)
+    if not p.is_file():
+        raise DistillError(f"page が見つからないか file ではありません: {rel}")
+    return p
 
 
 # ---------------------------------------------------------------------------
@@ -373,11 +414,18 @@ def render_index(root: Path, events: list[dict] | None = None) -> str:
     return "\n".join(lines)
 
 
-def reindex(root: Path) -> Path:
+def reindex_locked(root: Path, events: list[dict] | None = None) -> Path:
+    """**lock 保持済み**が前提の内部 helper（R3）。単体で呼ばない。"""
     p = distill_dir(root) / "_index.md"
     p.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(p, render_index(root))
+    atomic_write_text(p, render_index(root, events))
     return p
+
+
+def cmd_reindex(root: Path) -> Path:
+    """CLI verb。lock を取ってから再生成する（並行する mutating verb との競合を避ける）。"""
+    with VaultLock(root):
+        return reindex_locked(root)
 
 
 # ---------------------------------------------------------------------------
@@ -401,7 +449,7 @@ def opportunity_counts(events: list[dict], *, window_days: int = DEFAULT_WINDOW_
                 tzinfo=datetime.timezone.utc)
         except (KeyError, ValueError):
             continue
-        if at < start:
+        if at < start or at > now:      # R6: 窓は下限も上限も閉じる（未来時刻の event は算入しない）
             continue
         trig = ev.get("trigger") or {}
         key = (did, trig.get("trigger_source"), trig.get("trigger_ref"))
@@ -466,7 +514,7 @@ def cmd_nominate(root: Path, page: str, reason: str, actor: str | None = None) -
                 raise DistillError("head event が見つかりません（state 不整合）")
             ev.update(previous_event_id=head["event_id"], previous_event_sha256=head["_sha256"])
         written.append(write_event(root, ev))
-        reindex(root)
+        reindex_locked(root)
     print(f"NOMINATED {did} ({rel})")
     for p in written:
         print(f"  event: distill/events/{p.name}")
@@ -487,14 +535,13 @@ def cmd_decide(root: Path, distill_id: str, new_state: str, reason: str, actor: 
         if head is None:
             raise DistillError("head event が見つかりません")
         subject = dict(head["subject"])
-        page = distill_dir(root).parent / subject.get("page_path", "")
-        if subject.get("page_path") and page.is_file():
-            subject["page_sha256"] = sha256_file(page)   # 決定時点の内容を束縛し直す
+        page = resolved_page(root, subject.get("page_path"))   # R2: resolver 経由
+        subject["page_sha256"] = sha256_file(page)             # 決定時点の内容を束縛し直す
         ev = _base_event("decision", subject, "human", actor, reason=reason)
         ev.update(expected_previous_state=state, new_state=new_state,
                   previous_event_id=head["event_id"], previous_event_sha256=head["_sha256"])
         p = write_event(root, ev)
-        reindex(root)
+        reindex_locked(root)
     print(f"DECIDED {distill_id}: {state} -> {new_state}\n  event: distill/events/{p.name}")
     return 0
 
@@ -502,7 +549,8 @@ def cmd_decide(root: Path, distill_id: str, new_state: str, reason: str, actor: 
 def cmd_note(root: Path, event_type: str, *, distill_id: str | None, task_id: str | None,
              trigger_source: str, trigger_ref: str | None, opportunity_id: str | None,
              block_kind: str | None, source: str, strength: str, reason: str | None,
-             task_metadata: dict | None, unverifiable_reason: str | None, actor: str | None = None) -> int:
+             task_metadata: dict | None, unverifiable_reason: str | None, actor: str | None = None,
+             host: str | None = None) -> int:
     """opportunity / invoked / completed / blocked を記録する（候補発見用・安全 gate ではない）。"""
     actor = actor or _actor()
     if event_type not in OPPORTUNITY_EVENTS:
@@ -517,9 +565,8 @@ def cmd_note(root: Path, event_type: str, *, distill_id: str | None, task_id: st
                 break
         if subj is None:
             raise DistillError(f"unknown distill_id: {distill_id}（先に nominate してください）")
-        page = distill_dir(root).parent / subj.get("page_path", "")
-        if page.is_file():
-            subj["page_sha256"] = sha256_file(page)
+        page = resolved_page(root, subj.get("page_path"))      # R2: resolver 経由
+        subj["page_sha256"] = sha256_file(page)
         subject = subj
     elif task_id:
         subject = {"subject_type": "task", "task_id": task_id}
@@ -527,7 +574,9 @@ def cmd_note(root: Path, event_type: str, *, distill_id: str | None, task_id: st
         raise DistillError("--distill-id か --task-id のどちらかが必要です")
     ev = _base_event(event_type, subject, source, actor, strength=strength, reason=reason)
     if event_type == "opportunity":
-        ref = trigger_ref or derive_trigger_ref(task_id or (subject.get("page_path") or ""), now_utc(), source)
+        # R6: dedupe key の host は evidence の source enum ではなく **host identity**
+        ref = trigger_ref or derive_trigger_ref(task_id or (subject.get("page_path") or ""),
+                                                now_utc(), host or host_identity())
         trig = {"trigger_source": trigger_source, "trigger_ref": ref,
                 "task_metadata_status": "snapshot" if task_metadata else "unverifiable"}
         if task_metadata:
@@ -544,11 +593,35 @@ def cmd_note(root: Path, event_type: str, *, distill_id: str | None, task_id: st
                 raise DistillError("blocked には --block-kind が必要です")
             ev["block_kind"] = block_kind
     with VaultLock(root):
+        # R5: immutable store へ書く前に、lock 内で先行 opportunity と terminal 重複を検査する
+        events = load_events(root)
+        if event_type in ("invoked",) + TERMINAL_EVENTS:
+            opp = next((e for e in events
+                        if e.get("event_type") == "opportunity" and e.get("opportunity_id") == ev["opportunity_id"]), None)
+            if opp is None:
+                raise DistillError(f"先行 opportunity が見つかりません: {ev['opportunity_id']}")
+            if (opp.get("subject") or {}) != {k: v for k, v in subject.items() if k != "page_sha256"} and \
+                    (opp.get("subject") or {}).get("distill_id") != subject.get("distill_id") and \
+                    (opp.get("subject") or {}).get("task_id") != subject.get("task_id"):
+                raise DistillError("先行 opportunity と subject が一致しません")
+            if event_type in TERMINAL_EVENTS:
+                existing = [e["event_type"] for e in events
+                            if e.get("event_type") in TERMINAL_EVENTS and e.get("opportunity_id") == ev["opportunity_id"]]
+                if existing:
+                    raise DistillError(f"opportunity {ev['opportunity_id']} は既に {existing[0]} です"
+                                       f"（1 opportunity に terminal は1つ）")
         p = write_event(root, ev)
-        reindex(root)
+        reindex_locked(root)
     print(f"NOTED {event_type}: distill/events/{p.name}"
           + (f" (opportunity {ev.get('opportunity_id')})" if ev.get("opportunity_id") else ""))
     return 0
+
+
+def host_identity() -> str:
+    """dedupe key に使う host 識別子（COMPUTERNAME / HOSTNAME、無ければ platform.node()）。"""
+    import platform
+    return (os.environ.get("COMPUTERNAME") or os.environ.get("HOSTNAME")
+            or platform.node() or "unknown-host")
 
 
 def derive_trigger_ref(task_id: str, fire_time_utc: str, host: str) -> str:
@@ -588,7 +661,8 @@ def cmd_status(root: Path, distill_id: str | None = None, window_days: int = DEF
 def cmd_validate(root: Path, *, strict_index: bool = True) -> int:
     """event 集合と派生 index の invariant を検査（単一 schema では表せない分・契約 §10）。"""
     problems = []
-    events = load_events(root)
+    events, load_problems = scan_events(root)
+    problems += [f"event store: {p}" for p in load_problems]
     seen_ids = set()
     for ev in events:
         problems += [f"{ev.get('event_id')}: {p}" for p in validate_event(ev)]
@@ -636,18 +710,33 @@ def cmd_validate(root: Path, *, strict_index: bool = True) -> int:
     if strict_index and idx.exists():
         if idx.read_text(encoding="utf-8").strip() != render_index(root, events).strip():
             problems.append("distill/_index.md が再生成結果と一致しません（reindex してください）")
-    # page identity: 参照先ページの現在 hash と最後の event の hash が違えば drift として報告（自動失効はしない）
+    # page identity（R4）: 最後に page subject を束縛した event の hash と、現在の bytes を比較する。
+    # drift は state を書き換えない（自動失効なし）が、再レビューまで fail-closed（契約 §7）
     for did, s in candidate_states(events).items():
         rel = s.get("page_path")
         if not rel:
             continue
+        # authoritative な最新 page subject は **state chain の末尾**（人が review して束縛した時点）。
+        # opportunity 等の非 state event が hash を持っていても、それは drift 解消の根拠にしない
         try:
-            p = resolve_under_base(root, rel)
+            chain = state_chain(events, did)
+        except DistillError:
+            continue                      # chain の異常は上のブロックで報告済み
+        head_ev = chain[-1] if chain else None
+        try:
+            p = resolved_page(root, rel)
         except DistillError as e:
             problems.append(f"{did}: {e}")
             continue
-        if not p.is_file():
-            problems.append(f"{did}: page が見つかりません（{rel}）")
+        if head_ev is None or not (head_ev.get("subject") or {}).get("page_sha256"):
+            problems.append(f"{did}: page_sha256 を束縛した state event がありません")
+            continue
+        ev, subj = head_ev, head_ev["subject"]
+        current = sha256_file(p)
+        if current != subj["page_sha256"]:
+            problems.append(f"{did}: page drift（{rel} は {ev['event_id']} 以降に変更されています: "
+                            f"{subj['page_sha256'][:12]}… -> {current[:12]}…）。"
+                            f"再 review して指名し直すか、内容を戻してください")
     if problems:
         print("DISTILL-VALIDATE: FAIL")
         for p in problems:
@@ -698,6 +787,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--reason", default=None)
     p.add_argument("--task-metadata-json", default=None)
     p.add_argument("--unverifiable-reason", default=None)
+    p.add_argument("--host", default=None,
+                   help="dedupe key に使う host 識別子（既定: COMPUTERNAME/HOSTNAME）。source enum で代用しない")
 
     sub.add_parser("reindex", help="distill/_index.md を再生成")
     sub.add_parser("validate", help="event 集合と派生 index の invariant 検査")
@@ -720,9 +811,9 @@ def main(argv: list[str] | None = None) -> int:
                             trigger_source=a.trigger_source, trigger_ref=a.trigger_ref,
                             opportunity_id=a.opportunity_id, block_kind=a.block_kind,
                             source=a.source, strength=a.strength, reason=a.reason,
-                            task_metadata=meta, unverifiable_reason=a.unverifiable_reason)
+                            task_metadata=meta, unverifiable_reason=a.unverifiable_reason, host=a.host)
         if a.command == "reindex":
-            p = reindex(root)
+            p = cmd_reindex(root)
             print(f"reindexed: {p}")
             return 0
         if a.command == "validate":
