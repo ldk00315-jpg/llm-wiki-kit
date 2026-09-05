@@ -1094,5 +1094,87 @@ class TestBuiltinMatchesSchema(DistillCase):
                                  f"{name}: built-in={builtin_ok} schema={schema_ok}（判定が食い違う）")
 
 
+class TestLateSortingInvalidEvent(DistillCase):
+    """V7-R1: **正常 event より後ろに並ぶ** schema-invalid event でも、
+    mutating verb が health gate に到達して DistillError・ゼロ mutation になる。"""
+
+    LATE = {
+        "subject_string": b'{"event_id":"99990101T000000Z-deadbeef","occurred_at":"9999-01-01T00:00:00Z",'
+                          b'"event_type":"nominated","subject":"bad","source":"human","strength":"observed",'
+                          b'"actor":"t","reason":"r","expected_previous_state":"absent","new_state":"nominated"}',
+        "subject_list": b'{"event_id":"99990101T000000Z-deadbee0","occurred_at":"9999-01-01T00:00:00Z",'
+                        b'"event_type":"decision","subject":[1,2],"source":"human","strength":"observed",'
+                        b'"actor":"t","reason":"r","expected_previous_state":"nominated","new_state":"held"}',
+        "opportunity_subject_string": b'{"event_id":"99990101T000000Z-deadbee1","occurred_at":"9999-01-01T00:00:00Z",'
+                                      b'"event_type":"opportunity","subject":"bad","source":"host-task",'
+                                      b'"strength":"observed","actor":"h",'
+                                      b'"opportunity_id":"op-99990101T000000Z-deadbee1",'
+                                      b'"trigger":{"trigger_source":"scheduled","trigger_ref":"r",'
+                                      b'"task_metadata_status":"unverifiable","unverifiable_reason":"x"}}',
+    }
+
+    def _place(self, kind):
+        raw = self.LATE[kind]
+        eid = json.loads(raw)["event_id"]
+        (d.events_dir(self.root) / f"{eid}.json").write_bytes(raw)
+
+    def _snapshot(self):
+        idx = d.distill_dir(self.root) / "_index.md"
+        return (sorted(p.name for p in d.events_dir(self.root).glob("*.json")),
+                idx.read_bytes() if idx.exists() else None, self.page.read_bytes())
+
+    def test_note_with_distill_id_refuses(self):
+        """Codex 再現: reverse scan が先に不正 event へ当たる配置でも AttributeError にしない。"""
+        for kind in self.LATE:
+            with self.subTest(kind=kind):
+                self.setUp()
+                try:
+                    did = self._nominate()
+                    self._place(kind)
+                    before = self._snapshot()
+                    with self.assertRaises(d.DistillError):
+                        d.cmd_note(self.root, "opportunity", distill_id=did, task_id=None,
+                                   trigger_source="scheduled", trigger_ref="r1", opportunity_id=None,
+                                   block_kind=None, source="host-task", strength="observed", reason=None,
+                                   task_metadata=None, unverifiable_reason=None, actor="h")
+                    self.assertEqual(self._snapshot(), before)
+                finally:
+                    self.tearDown()
+        self.setUp()
+
+    def test_all_verbs_refuse_with_late_invalid_event(self):
+        did = self._nominate()
+        self._place("subject_string")
+        before = self._snapshot()
+        second = self.root / "wiki" / "concepts" / "Second.md"
+        second.write_text(PAGE, encoding="utf-8")
+        for label, fn in (
+            ("nominate", lambda: d.cmd_nominate(self.root, "wiki/concepts/Second.md", "r", actor="t")),
+            ("decide", lambda: d.cmd_decide(self.root, did, "accepted", "r", actor="t")),
+            ("note-task", lambda: d.cmd_note(self.root, "opportunity", distill_id=None, task_id="t1",
+                                             trigger_source="scheduled", trigger_ref="r1", opportunity_id=None,
+                                             block_kind=None, source="host-task", strength="observed",
+                                             reason=None, task_metadata=None, unverifiable_reason=None, actor="h")),
+            ("reindex", lambda: d.cmd_reindex(self.root)),
+        ):
+            with self.subTest(verb=label), self.assertRaises(d.DistillError):
+                fn()
+        self.assertNotIn("distill_id", d.read_frontmatter(second))
+        self.assertEqual(self._snapshot(), before)
+        self.assertEqual(d.cmd_status(self.root), 2)
+        self.assertEqual(d.cmd_validate(self.root), 2)
+
+    def test_note_reads_only_validated_events_for_subject(self):
+        """subject 解決は validated events からのみ行う（不正 event を subject の材料にしない）。"""
+        did = self._nominate()
+        self._place("opportunity_subject_string")
+        with self.assertRaises(d.DistillError) as cm:
+            d.cmd_note(self.root, "completed", distill_id=did, task_id=None, trigger_source="scheduled",
+                       trigger_ref=None, opportunity_id="op-99990101T000000Z-deadbee1", block_kind=None,
+                       source="host-task", strength="observed", reason=None, task_metadata=None,
+                       unverifiable_reason=None, actor="h")
+        self.assertIn("event store", str(cm.exception))   # health gate で止まる（先行 opportunity 検査より前）
+
+
 if __name__ == "__main__":
     unittest.main()

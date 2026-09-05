@@ -242,7 +242,11 @@ def scan_events(root: Path) -> tuple[list[dict], list[str]]:
 
 
 def load_events(root: Path) -> list[dict]:
-    """valid な event だけを返す（状態計算用）。診断が要る場面では scan_events を使う。"""
+    """**parse できた** event を返すだけの薄い wrapper（schema/遷移は見ていない）。
+
+    注意: mutating path では使わない。書き込み経路は必ず `assert_store_healthy()` の
+    validated events を使うこと（V7-R1: 名前に反して未検証集合であることを明記）。
+    """
     return scan_events(root)[0]
 
 
@@ -837,67 +841,71 @@ def cmd_note(root: Path, event_type: str, *, distill_id: str | None, task_id: st
              block_kind: str | None, source: str, strength: str, reason: str | None,
              task_metadata: dict | None, unverifiable_reason: str | None, actor: str | None = None,
              host: str | None = None) -> int:
-    """opportunity / invoked / completed / blocked を記録する（候補発見用・安全 gate ではない）。"""
+    """opportunity / invoked / completed / blocked を記録する（候補発見用・安全 gate ではない）。
+
+    V7-R1: store の読み取り・subject 解決・page hash・先行 opportunity 検査・書き込みは
+    **すべて同一 VaultLock 内**で、`assert_store_healthy` が返した validated events に対して行う。
+    health gate より前に raw store を読むと、schema-invalid event で例外終了したり、
+    検査に使った snapshot と event 構築に使った snapshot がずれたりする。
+    """
     actor = actor or _actor()
     if event_type not in OPPORTUNITY_EVENTS:
         raise DistillError("note は opportunity|invoked|completed|blocked のみ")
-    if distill_id:
-        events = load_events(root)
-        subj = None
-        for ev in reversed(events):
-            s = ev.get("subject") or {}
-            if s.get("distill_id") == distill_id and s.get("subject_type") == "page":
-                subj = dict(s)
-                break
-        if subj is None:
-            raise DistillError(f"unknown distill_id: {distill_id}（先に nominate してください）")
-        page = resolved_page(root, subj.get("page_path"))      # R2: resolver 経由
-        subj["page_sha256"] = sha256_file(page)
-        subject = subj
-    elif task_id:
-        subject = {"subject_type": "task", "task_id": task_id}
-    else:
+    if not distill_id and not task_id:
         raise DistillError("--distill-id か --task-id のどちらかが必要です")
-    ev = _base_event(event_type, subject, source, actor, strength=strength, reason=reason)
-    if event_type == "opportunity":
-        # R6: dedupe key の host は evidence の source enum ではなく **host identity**
-        ref = trigger_ref or derive_trigger_ref(task_id or (subject.get("page_path") or ""),
-                                                now_utc(), host or host_identity())
-        trig = {"trigger_source": trigger_source, "trigger_ref": ref,
-                "task_metadata_status": "snapshot" if task_metadata else "unverifiable"}
-        if task_metadata:
-            trig["task_metadata"] = task_metadata
-        else:
-            trig["unverifiable_reason"] = unverifiable_reason or "no host adapter for task metadata"
-        ev.update(opportunity_id=opportunity_id or new_opportunity_id(), trigger=trig)
-    else:
-        if not opportunity_id:
-            raise DistillError(f"{event_type} には --opportunity-id が必要です（先行 opportunity を参照）")
-        ev["opportunity_id"] = opportunity_id
-        if event_type == "blocked":
-            if not block_kind:
-                raise DistillError("blocked には --block-kind が必要です")
-            ev["block_kind"] = block_kind
+    if event_type != "opportunity" and not opportunity_id:
+        raise DistillError(f"{event_type} には --opportunity-id が必要です（先行 opportunity を参照）")
+    if event_type == "blocked" and not block_kind:
+        raise DistillError("blocked には --block-kind が必要です")
+
     with VaultLock(root):
-        # R5/V2-R1: 破損 store では書かない。先行 opportunity・subject 整合・terminal 重複・ID 一意性を書く前に検査
-        events = assert_store_healthy(root)
+        events = assert_store_healthy(root)      # ここより前に store を読まない
+        if distill_id:
+            subj = None
+            for ev0 in reversed(events):         # validated events だけを走査する
+                s = ev0.get("subject") or {}
+                if s.get("subject_type") == "page" and s.get("distill_id") == distill_id:
+                    subj = dict(s)
+                    break
+            if subj is None:
+                raise DistillError(f"unknown distill_id: {distill_id}（先に nominate してください）")
+            page = resolved_page(root, subj.get("page_path"))      # R2: resolver 経由
+            subj["page_sha256"] = sha256_file(page)
+            subject = subj
+        else:
+            subject = {"subject_type": "task", "task_id": task_id}
+
+        ev = _base_event(event_type, subject, source, actor, strength=strength, reason=reason)
         if event_type == "opportunity":
+            # R6: dedupe key の host は evidence の source enum ではなく **host identity**
+            ref = trigger_ref or derive_trigger_ref(task_id or (subject.get("page_path") or ""),
+                                                    now_utc(), host or host_identity())
+            trig = {"trigger_source": trigger_source, "trigger_ref": ref,
+                    "task_metadata_status": "snapshot" if task_metadata else "unverifiable"}
+            if task_metadata:
+                trig["task_metadata"] = task_metadata
+            else:
+                trig["unverifiable_reason"] = unverifiable_reason or "no host adapter for task metadata"
+            ev.update(opportunity_id=opportunity_id or new_opportunity_id(), trigger=trig)
             if any(e.get("opportunity_id") == ev["opportunity_id"] and e.get("event_type") == "opportunity"
                    for e in events):
                 raise DistillError(f"opportunity_id が既に存在します: {ev['opportunity_id']}（V2-R4: 全体で一意）")
         else:
+            ev["opportunity_id"] = opportunity_id
+            if event_type == "blocked":
+                ev["block_kind"] = block_kind
             opp = next((e for e in events
-                        if e.get("event_type") == "opportunity" and e.get("opportunity_id") == ev["opportunity_id"]), None)
+                        if e.get("event_type") == "opportunity" and e.get("opportunity_id") == opportunity_id), None)
             if opp is None:
-                raise DistillError(f"先行 opportunity が見つかりません: {ev['opportunity_id']}")
+                raise DistillError(f"先行 opportunity が見つかりません: {opportunity_id}")
             if subject_identity(opp.get("subject")) != subject_identity(subject):
                 raise DistillError(f"先行 opportunity と subject が一致しません: "
                                    f"{subject_identity(opp.get('subject'))} != {subject_identity(subject)}")
             if event_type in TERMINAL_EVENTS:
                 existing = [e["event_type"] for e in events
-                            if e.get("event_type") in TERMINAL_EVENTS and e.get("opportunity_id") == ev["opportunity_id"]]
+                            if e.get("event_type") in TERMINAL_EVENTS and e.get("opportunity_id") == opportunity_id]
                 if existing:
-                    raise DistillError(f"opportunity {ev['opportunity_id']} は既に {existing[0]} です"
+                    raise DistillError(f"opportunity {opportunity_id} は既に {existing[0]} です"
                                        f"（1 opportunity に terminal は1つ）")
         p = write_event(root, ev)
         reindex_locked(root)
