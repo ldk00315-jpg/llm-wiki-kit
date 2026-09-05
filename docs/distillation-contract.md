@@ -1,6 +1,6 @@
 # 蒸留契約: Wiki→Skill蒸留トラック（D）
 
-- 版: 0.1（**docs/schema のみ・merge 1**。実行可能な `wiki-distill` は merge 2）
+- 版: 0.2（merge 2 で `core/distill.py`＋`skills/wiki-distill/` を実装。契約本文は merge 1 から不変）
 - 日付: 2026-09-04
 - 起案: なな（Claude / Anthropic）／独立レビュー: なな（Codex / OpenAI）
 - 位置づけ: 設計v2（`skill-distillation-track-design-v2-2026-09-04.md`・APPROVE WITH REQUIRED CLARIFICATIONS C-01〜C-09）の契約版。原則の出典は共有Vault `SkillDistillationControlPlane` #1〜#35（pilot: eBay週次runner・2026-09-01〜03）

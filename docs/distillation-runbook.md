@@ -1,6 +1,6 @@
 # 蒸留 runbook: nomination → proposal → validation → deployment → observation → planned undeploy
 
-- 版: 0.1（merge 1・docs のみ）
+- 版: 0.2（merge 2: CLI `core/distill.py` の verb と対応。§1〜§2 の操作は実装済み、§3 以降は手順のみ）
 - 日付: 2026-09-04
 - 前提: `docs/distillation-contract.md`。pilot（eBay週次runner）で実証済みの順序を汎用化したもの。事故 resolve は §7 に分離
 
