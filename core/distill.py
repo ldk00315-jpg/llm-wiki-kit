@@ -68,8 +68,8 @@ MERGE3_CUTOFF = "2026-09-09T00:00:00Z"   # 文書用。legacy 判定には使わ
 # R5 (G19): id だけでは「その名前の file を書けば legacy になる」ので、file bytes の sha256 も添えて
 # 等値検査する（偽造するには本物の chain を丸ごと複製するしかなくなる）。
 LEGACY_ACCEPTED_EVENTS: dict[str, str] = {
-    "20260908T001351Z-c8e02b64":   # 共有 Vault d-6ddce7f6 の accepted（2026-09-08・とんすけ）
-        "d68394d9187dbfbca31203389447c76e433106a6f8a782373790dcc85a01b849",
+    # 2026-09-09: 共有 Vault d-6ddce7f6 の accepted（20260908T001351Z-c8e02b64）は rereview で束縛し直したので
+    # entry を外した。以後は空。新しい legacy を認めるには、その event の id と sha256 を commit で追加する
 }
 LEGACY_ACCEPTED_EVENT_IDS: frozenset[str] = frozenset(LEGACY_ACCEPTED_EVENTS)   # 後方互換（参照用）
 
