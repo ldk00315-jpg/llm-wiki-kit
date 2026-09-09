@@ -927,7 +927,9 @@ def test_G18_clock_skew_bricks_chain_through_legit_cli(v, monkeypatch, capsys):
 # R5 再確認（G19〜G25）: G15 / G17 / G18 の直し方が新しく開けた穴
 # ===========================================================================
 
-LEGACY_ID = next(iter(d.LEGACY_ACCEPTED_EVENT_IDS))                   # "20260908T001351Z-c8e02b64"
+# 2026-09-09 follow-up で固定リストは空になった（共有 Vault の legacy は rereview で束縛し直した）。
+# 監査時の値を既定にして import できるようにする。legacy 系の probe は「legacy が存在した当時」の記録
+LEGACY_ID = next(iter(d.LEGACY_ACCEPTED_EVENT_IDS), "20260908T001351Z-c8e02b64")
 LEGACY_AT = (f"{LEGACY_ID[0:4]}-{LEGACY_ID[4:6]}-{LEGACY_ID[6:8]}T"
              f"{LEGACY_ID[9:11]}:{LEGACY_ID[11:13]}:{LEGACY_ID[13:15]}Z")
 
