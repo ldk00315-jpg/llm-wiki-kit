@@ -42,6 +42,22 @@ python core/distill.py decide d-xxxxxxxx rejected --reason "<却下の理由>"
 
 `nominated` からのみ遷移できる。`--reason` は必須（却下理由は次の指名を止めるための資産）。
 `held` からは再度 `nominate` で戻せる。`accepted` / `rejected` は terminal。
+`accepted` は `distill/<skill_slug>/proposal.md` と `effect-contract.json` の hash を自動で束縛する
+（どちらかが無い・読めないと **何も書かずに失敗**する。任意で `--bundle-sha256 <64hex>` も束縛できる）。
+
+```
+python core/distill.py rereview d-xxxxxxxx --reason "<人が何を再レビューしたか>"
+```
+
+`rereview` は **state を変えずに**、ページ（と accepted なら proposal / effect contract）の hash を今の実体で
+束縛し直す1イベント。ページを直して page drift になったときは、`decide held`→`nominate` の2発ではなくこれを使う。
+`nominated` / `accepted` からのみ。**人が実際に再レビューしたときだけ**実行する（drift の自動解消に使わない）。
+`--bundle-sha256` を省くと**直前の accepted の candidate bundle 束縛を引き継ぐ**。外すときは `--drop-bundle` を明示する。
+merge 3 より前に書かれた `accepted`（`bound_to` を持たない）を validate が `legacy` として報告したときも、
+束縛し直す正規の経路はこれ（人が今の proposal / effect contract を再レビューしてから実行する）。
+
+state を変える操作（`nominate` / `decide` / `rereview`）と `note` のあとは、**`distill reindex`** で
+`distill/_index.md` を再生成する（`llmwiki.py reindex` は wiki 側の索引で、distill の index は書かない）。
 
 ## 4. 機会を記録する（候補発見のための静かな蓄積）
 
@@ -58,13 +74,22 @@ python core/distill.py note --type blocked   --opportunity-id op-... --distill-i
 - Wikiページを持たない scheduled task は `--task-id <id>` で記録する（候補 state は動かない＝discovery evidence）
 - `--strength` は既定 `asserted`（エージェントの自己申告）。host が確かに観測したものだけ `observed` にする。
   取り忘れは「機会がなかった」の証明にはならない——**これは安全ゲートではなく静かな発見であり、取りこぼしを許容する**
+- 書いたあとは **`python core/distill.py reindex`**（`distill/_index.md` は派生物。再生成しないと validate が不一致を報告する）
 
 ## 5. 索引と検査
 
 ```
 python core/distill.py reindex     # distill/_index.md を再生成（この操作だけが index を書く）
 python core/distill.py validate    # event 集合と派生 index の invariant 検査
+python core/distill.py validate --refs --ref-base eBay=I:/Workspace/eBay   # proposal の refs を実体 hash と照合
 ```
+
+`--refs` は proposal の `source_refs[]` と `effect_contract` を実体と照合し、`ok` / `mismatch`（FAIL）/
+`unverifiable`（報告のみ）の3件数を出す。proposal frontmatter は YAML の限定サブセット（ブロック形式の入れ子・
+1行 JSON flow の両方）として読み、対応しない構文（anchor / tag / `|` `>` / 複数行 flow / タブインデント等）は
+`unparseable` として報告して refs を `unverifiable` にする（部分的に読んだ結果で「一致」と言わない）。
+`bound_to` を持たない `accepted` は、**2026-09-09T00:00:00Z より前**に書かれたものだけ `legacy=N` として数え **FAIL にしない**（`rereview` で束縛し直す）。それ以降のものは FAIL（今の CLI は必ず束縛を書く）。`unparseable` な proposal は `decide accepted` も通らない（読める形に直してから承認する）。`wiki/…` `distill/…` 以外の path は先頭 segment を base id とみなすので、
+`--ref-base <id>=<dir>` を与えないと **unverifiable**（＝「検証していない」。「一致」ではない）になる。
 
 `validate` が見るもの: event の schema と遷移表、state chain（`previous_event_id` の連鎖・分岐や孤児を検出）、
 head hash の一致、1 opportunity に terminal 最大1つ、先行 opportunity の存在、index が再生成結果と一致するか、

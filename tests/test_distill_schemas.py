@@ -126,8 +126,9 @@ class TestDistillEvent(unittest.TestCase):
         self.assertTrue(_bad(self.s, dict(n, expected_previous_state="held", previous_event_sha256=SHA)))
 
     def test_m02_decision_always_binds_previous(self):
+        # merge 3 A: accepted は bound_to（proposal / effect contract hash）も必須になった
         d = dict(self.base, event_type="decision", subject=self._page(), source="human", actor="tonsuke", reason="ok",
-                 expected_previous_state="nominated", new_state="accepted")
+                 expected_previous_state="nominated", new_state="accepted", bound_to=self._bound())
         self.assertTrue(_bad(self.s, d))
         _ok(self.s, dict(d, previous_event_id=EID, previous_event_sha256=SHA))
 
@@ -157,7 +158,8 @@ class TestDistillEvent(unittest.TestCase):
         nom = dict(self.base, event_type="nominated", source="human", actor="tonsuke", reason="x",
                    expected_previous_state="absent", new_state="nominated")
         dec = dict(self.base, event_type="decision", source="human", actor="tonsuke", reason="ok",
-                   expected_previous_state="nominated", new_state="accepted", previous_event_id=EID, previous_event_sha256=SHA)
+                   expected_previous_state="nominated", new_state="accepted", previous_event_id=EID,
+                   previous_event_sha256=SHA, bound_to=self._bound())   # merge 3 A
         obs = dict(self.base, event_type="observed", source="system", actor="wiki-health",
                    expected_previous_state="absent", new_state="observed",
                    threshold={"window_days": 30, "min_opportunities": 3, "counted_event_ids": [EID]})
@@ -171,6 +173,101 @@ class TestDistillEvent(unittest.TestCase):
                 self.assertTrue(_bad(self.s, dict(ev, subject=p)), (ev["event_type"], missing))
         # task discovery は opportunity として記録できる（candidate state ではない）
         _ok(self.s, self._opp())
+
+    # --- merge 3 A: bound_to ---
+    def _bound(self, **over):
+        b = {"proposal": {"path": "distill/x/proposal.md", "sha256": SHA},
+             "effect_contract": {"path": "distill/x/effect-contract.json", "sha256": SHA}}
+        b.update(over)
+        return b
+
+    def _decision(self, new_state="accepted", **over):
+        e = dict(self.base, event_type="decision", subject=self._page(), source="human", actor="tonsuke",
+                 reason="ok", expected_previous_state="nominated", new_state=new_state,
+                 previous_event_id=EID, previous_event_sha256=SHA)
+        if new_state == "accepted":
+            e["bound_to"] = self._bound()
+        e.update(over)
+        return e
+
+    def test_a_accepted_bound_to_is_optional_but_complete(self):
+        """R2-1: `bound_to` は optional（merge 3 より前の accepted を後から不正にしない）。
+
+        あるなら proposal と effect_contract を必ず含む。R1 は naked を **invalid** にしていた。
+        """
+        _ok(self.s, self._decision())
+        _ok(self.s, self._decision(bound_to=self._bound(candidate_bundle={"sha256": SHA})))
+        naked = self._decision()
+        naked.pop("bound_to")
+        _ok(self.s, naked)                                         # legacy accepted（bound_to 無し）
+        for missing in ("proposal", "effect_contract"):
+            b = self._bound()
+            b.pop(missing)
+            self.assertTrue(_bad(self.s, self._decision(bound_to=b)), missing)
+
+    def test_a_non_accepted_forbids_bound_to(self):
+        for state in ("held", "rejected"):
+            _ok(self.s, self._decision(state))
+            self.assertTrue(_bad(self.s, self._decision(state, bound_to=self._bound())), state)
+
+    def test_a_bound_to_shapes(self):
+        for junk in (None, True, 7, "x", [], [{"sha256": SHA}]):
+            self.assertTrue(_bad(self.s, self._decision(bound_to=junk)), junk)
+        for ref in ({"path": "distill/x/proposal.md"}, {"sha256": SHA},
+                    {"path": "../escape.md", "sha256": SHA}, {"path": "C:/x.md", "sha256": SHA},
+                    {"path": "distill/x/proposal.md", "sha256": "zz"},
+                    {"path": "distill/x/proposal.md", "sha256": SHA.upper()},
+                    {"path": "distill/x/proposal.md", "sha256": SHA, "role": "wiki-page"},
+                    {"path": 7, "sha256": SHA}):
+            self.assertTrue(_bad(self.s, self._decision(bound_to=self._bound(proposal=ref))), ref)
+        self.assertTrue(_bad(self.s, self._decision(bound_to=self._bound(runtime={"sha256": SHA}))))
+        for bundle in ({"path": "a/b", "sha256": SHA}, {"sha256": "zz"}, {}, True):
+            self.assertTrue(_bad(self.s, self._decision(bound_to=self._bound(candidate_bundle=bundle))), bundle)
+
+    def test_a_bound_to_forbidden_on_other_event_types(self):
+        n = dict(self.base, event_type="nominated", subject=self._page(), source="human", actor="t", reason="x",
+                 expected_previous_state="absent", new_state="nominated")
+        self.assertTrue(_bad(self.s, dict(n, bound_to=self._bound())))
+        self.assertTrue(_bad(self.s, dict(self._opp(), bound_to=self._bound())))
+        r = dict(self.base, event_type="registered", subject=self._page(), source="human", actor="t", reason="r")
+        self.assertTrue(_bad(self.s, dict(r, bound_to=self._bound())))
+
+    # --- merge 3 B: rereviewed ---
+    def _rereview(self, state="accepted", **over):
+        e = dict(self.base, event_type="rereviewed", subject=self._page(), source="human", actor="tonsuke",
+                 reason="人が再レビューした", expected_previous_state=state, new_state=state,
+                 previous_event_id=EID, previous_event_sha256=SHA)
+        if state == "accepted":
+            e["bound_to"] = self._bound()
+        e.update(over)
+        return e
+
+    def test_b_rereviewed_keeps_state(self):
+        _ok(self.s, self._rereview("accepted"))
+        _ok(self.s, self._rereview("nominated"))
+        self.assertTrue(_bad(self.s, self._rereview("nominated", new_state="accepted")))
+        self.assertTrue(_bad(self.s, self._rereview("accepted", new_state="nominated")))
+
+    def test_b_rereviewed_only_from_nominated_or_accepted(self):
+        for state in ("absent", "observed", "held", "rejected"):
+            e = self._rereview("nominated", expected_previous_state=state, new_state=state)
+            self.assertTrue(_bad(self.s, e), state)
+
+    def test_b_rereviewed_requires_previous_reason_and_page(self):
+        for missing in ("previous_event_id", "previous_event_sha256", "reason"):
+            e = self._rereview()
+            e.pop(missing)
+            self.assertTrue(_bad(self.s, e), missing)
+        self.assertTrue(_bad(self.s, self._rereview(source="system")))
+        self.assertTrue(_bad(self.s, self._rereview(strength="asserted")))
+        self.assertTrue(_bad(self.s, self._rereview(subject={"subject_type": "task", "task_id": "t"})))
+        self.assertTrue(_bad(self.s, self._rereview(opportunity_id="op-20260904T090000Z-0badcafe")))
+
+    def test_b_rereviewed_bound_to_rule(self):
+        e = self._rereview("accepted")
+        e.pop("bound_to")
+        _ok(self.s, e)                                    # R2-1: accepted でも bound_to は optional
+        self.assertTrue(_bad(self.s, self._rereview("nominated", bound_to=self._bound())))
 
     # --- R2-03 / R3-02 ---
     def test_r3_02_good_paths_accepted(self):
@@ -277,6 +374,17 @@ class TestProposal(unittest.TestCase):
     def test_ok(self):
         _ok(self.s, self.base)
 
+    # --- merge 3 D: document_revision / supersedes ---
+    def test_d_document_revision_and_supersedes(self):
+        _ok(self.s, dict(self.base, document_revision="1.2", supersedes="1.1"))
+        _ok(self.s, dict(self.base, document_revision="10.0"))
+        _ok(self.s, dict(self.base, extensions={"revision": "1.2"}))          # 後方互換は残す
+        _ok(self.s, dict(self.base, document_revision="1.2", extensions={"revision": "1.1"}))  # 食い違いは validator が見る
+        for bad in ("1", "v1.2", "1.2.3", "", "1.", ".2", 1.2, None, ["1.2"]):
+            self.assertTrue(_bad(self.s, dict(self.base, document_revision=bad)), bad)
+        for bad in ("", 3, None, ["x"], {"a": 1}):
+            self.assertTrue(_bad(self.s, dict(self.base, supersedes=bad)), bad)
+
     def test_r2_03_portable_paths_in_proposal(self):
         for bad in BAD_PATHS:
             p = json.loads(json.dumps(self.base)); p["source_refs"][0]["path"] = bad
@@ -332,6 +440,22 @@ class TestEffectContract(unittest.TestCase):
         with_backup = {k: v for k, v in self.e06.items() if k != "irreversible_ack"}
         with_backup.update(reversibility="backup_restore", backup={"method": "copy", "taken_before_write": True, "scope": "input csv"})
         _ok(self.s, self._c(with_backup))  # delete は backup 経路でも通る
+
+    # --- merge 3 E: expected_inputs / capability_boundary ---
+    def test_e_expected_inputs(self):
+        _ok(self.s, dict(self._c(self.e01), expected_inputs={"accounts": ["main", "sub"]}))
+        _ok(self.s, dict(self._c(self.e01), extensions={"expected-accounts": ["main"]}))   # 後方互換
+        _ok(self.s, dict(self._c(self.e01), expected_inputs={"accounts": ["main"]},
+                         extensions={"expected-accounts": ["main"]}))
+        for bad in ({}, {"accounts": []}, {"accounts": ["main", "main"]}, {"accounts": ["", "x"]},
+                    {"accounts": ["   "]}, {"accounts": "main"}, {"accounts": [1]}, {"accounts": None},
+                    {"accounts": ["main"], "unknown": ["x"]}, [], "main", None, True):
+            self.assertTrue(_bad(self.s, dict(self._c(self.e01), expected_inputs=bad)), bad)
+
+    def test_e_capability_boundary(self):
+        _ok(self.s, self._c(dict(self.e03, capability_boundary="listings table only")))
+        for bad in ("", 1, None, [], {"a": 1}):
+            self.assertTrue(_bad(self.s, self._c(dict(self.e03, capability_boundary=bad))), bad)
 
     def test_read_requires_freshness_and_completeness(self):
         r = dict(self.e03); r.pop("completeness")

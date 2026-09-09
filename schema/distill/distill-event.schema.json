@@ -7,7 +7,7 @@
   "properties": {
     "event_id": {"$ref": "#/$defs/event_id"},
     "occurred_at": {"$ref": "#/$defs/utc"},
-    "event_type": {"enum": ["registered", "observed", "nominated", "decision", "opportunity", "invoked", "completed", "blocked"]},
+    "event_type": {"enum": ["registered", "observed", "nominated", "decision", "rereviewed", "opportunity", "invoked", "completed", "blocked"]},
     "subject": {
       "type": "object",
       "required": ["subject_type"],
@@ -63,7 +63,18 @@
       "properties": {"window_days": {"type": "integer", "minimum": 1}, "min_opportunities": {"type": "integer", "minimum": 1},
                      "counted_event_ids": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/event_id"}}}
     },
-    "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence_ref"}}
+    "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence_ref"}},
+    "bound_to": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "accepted が承認した対象の hash 束縛（契約 §6 candidate validation）。decision / rereviewed の new_state=accepted でのみ持てる",
+      "properties": {
+        "proposal": {"$ref": "#/$defs/hash_ref"},
+        "effect_contract": {"$ref": "#/$defs/hash_ref"},
+        "candidate_bundle": {"type": "object", "required": ["sha256"], "additionalProperties": false,
+                             "properties": {"sha256": {"$ref": "#/$defs/sha256"}}}
+      }
+    }
   },
   "allOf": [
     {
@@ -74,7 +85,7 @@
                               "subject": {"properties": {"subject_type": {"const": "page"}}}},
                "not": {"anyOf": [{"required": ["expected_previous_state"]}, {"required": ["new_state"]}, {"required": ["opportunity_id"]},
                                  {"required": ["trigger"]}, {"required": ["threshold"]}, {"required": ["block_kind"]},
-                                 {"required": ["previous_event_id"]}, {"required": ["previous_event_sha256"]}]}}
+                                 {"required": ["previous_event_id"]}, {"required": ["previous_event_sha256"]}, {"required": ["bound_to"]}]}}
     },
     {
       "$comment": "observed: 自動閾値到達（system）。absent → observed のみ。previous を持たない",
@@ -84,7 +95,7 @@
                               "subject": {"properties": {"subject_type": {"const": "page"}}},
                               "expected_previous_state": {"const": "absent"}, "new_state": {"const": "observed"}},
                "not": {"anyOf": [{"required": ["opportunity_id"]}, {"required": ["trigger"]}, {"required": ["block_kind"]},
-                                 {"required": ["previous_event_id"]}, {"required": ["previous_event_sha256"]}]}}
+                                 {"required": ["previous_event_id"]}, {"required": ["previous_event_sha256"]}, {"required": ["bound_to"]}]}}
     },
     {
       "$comment": "nominated: absent|observed|held → nominated（人）。absent は previous 両方禁止、observed|held は両方必須",
@@ -93,7 +104,7 @@
                "properties": {"source": {"const": "human"}, "strength": {"const": "observed"},
                               "subject": {"properties": {"subject_type": {"const": "page"}}},
                               "expected_previous_state": {"enum": ["absent", "observed", "held"]}, "new_state": {"const": "nominated"}},
-               "not": {"anyOf": [{"required": ["opportunity_id"]}, {"required": ["trigger"]}, {"required": ["threshold"]}, {"required": ["block_kind"]}]},
+               "not": {"anyOf": [{"required": ["opportunity_id"]}, {"required": ["trigger"]}, {"required": ["threshold"]}, {"required": ["block_kind"]}, {"required": ["bound_to"]}]},
                "allOf": [
                  {"if": {"properties": {"expected_previous_state": {"const": "absent"}}},
                   "then": {"not": {"anyOf": [{"required": ["previous_event_id"]}, {"required": ["previous_event_sha256"]}]}},
@@ -101,13 +112,30 @@
                ]}
     },
     {
-      "$comment": "decision: nominated → held|rejected|accepted（人）。previous 両方必須",
+      "$comment": "decision: nominated → held|rejected|accepted（人）。previous 両方必須。accepted のときだけ bound_to（proposal/effect contract hash）を持てる（optional・R2-1）。それ以外は bound_to 禁止",
       "if": {"properties": {"event_type": {"const": "decision"}}},
       "then": {"required": ["reason", "expected_previous_state", "new_state", "previous_event_id", "previous_event_sha256"],
                "properties": {"source": {"const": "human"}, "strength": {"const": "observed"},
                               "subject": {"properties": {"subject_type": {"const": "page"}}},
                               "expected_previous_state": {"const": "nominated"}, "new_state": {"enum": ["held", "rejected", "accepted"]}},
-               "not": {"anyOf": [{"required": ["opportunity_id"]}, {"required": ["trigger"]}, {"required": ["threshold"]}, {"required": ["block_kind"]}]}}
+               "not": {"anyOf": [{"required": ["opportunity_id"]}, {"required": ["trigger"]}, {"required": ["threshold"]}, {"required": ["block_kind"]}]},
+               "allOf": [{"$ref": "#/$defs/bound_to_rule"}]}
+    },
+    {
+      "$comment": "rereviewed: 人の再レビュー（nominated|accepted → 同じ state）。state は変えず page identity を束縛し直す。previous 両方必須",
+      "if": {"properties": {"event_type": {"const": "rereviewed"}}},
+      "then": {"required": ["reason", "expected_previous_state", "new_state", "previous_event_id", "previous_event_sha256"],
+               "properties": {"source": {"const": "human"}, "strength": {"const": "observed"},
+                              "subject": {"properties": {"subject_type": {"const": "page"}}},
+                              "expected_previous_state": {"enum": ["nominated", "accepted"]}, "new_state": {"enum": ["nominated", "accepted"]}},
+               "not": {"anyOf": [{"required": ["opportunity_id"]}, {"required": ["trigger"]}, {"required": ["threshold"]}, {"required": ["block_kind"]}]},
+               "allOf": [
+                 {"if": {"properties": {"expected_previous_state": {"const": "accepted"}}, "required": ["expected_previous_state"]},
+                  "then": {"properties": {"new_state": {"const": "accepted"}}},
+                  "else": {"if": {"properties": {"expected_previous_state": {"const": "nominated"}}, "required": ["expected_previous_state"]},
+                           "then": {"properties": {"new_state": {"const": "nominated"}}}}},
+                 {"$ref": "#/$defs/bound_to_rule"}
+               ]}
     },
     {
       "$comment": "opportunity: source は host-task|agent-self-report|human（system 不可）。state/previous/threshold/block を持たない",
@@ -115,7 +143,7 @@
       "then": {"required": ["opportunity_id", "trigger"],
                "properties": {"source": {"enum": ["host-task", "agent-self-report", "human"]}},
                "not": {"anyOf": [{"required": ["expected_previous_state"]}, {"required": ["new_state"]}, {"required": ["threshold"]},
-                                 {"required": ["block_kind"]}, {"required": ["previous_event_id"]}, {"required": ["previous_event_sha256"]}]}}
+                                 {"required": ["block_kind"]}, {"required": ["previous_event_id"]}, {"required": ["previous_event_sha256"]}, {"required": ["bound_to"]}]}}
     },
     {
       "$comment": "invoked/completed: opportunity_id 必須。system 不可。state/previous/trigger/threshold/block を持たない",
@@ -123,7 +151,7 @@
       "then": {"required": ["opportunity_id"],
                "properties": {"source": {"enum": ["host-task", "agent-self-report", "human"]}},
                "not": {"anyOf": [{"required": ["expected_previous_state"]}, {"required": ["new_state"]}, {"required": ["trigger"]}, {"required": ["threshold"]},
-                                 {"required": ["block_kind"]}, {"required": ["previous_event_id"]}, {"required": ["previous_event_sha256"]}]}}
+                                 {"required": ["block_kind"]}, {"required": ["previous_event_id"]}, {"required": ["previous_event_sha256"]}, {"required": ["bound_to"]}]}}
     },
     {
       "$comment": "blocked: opportunity_id と block_kind 必須。system 不可",
@@ -131,7 +159,7 @@
       "then": {"required": ["opportunity_id", "block_kind"],
                "properties": {"source": {"enum": ["host-task", "agent-self-report", "human"]}},
                "not": {"anyOf": [{"required": ["expected_previous_state"]}, {"required": ["new_state"]}, {"required": ["trigger"]}, {"required": ["threshold"]},
-                                 {"required": ["previous_event_id"]}, {"required": ["previous_event_sha256"]}]}}
+                                 {"required": ["previous_event_id"]}, {"required": ["previous_event_sha256"]}, {"required": ["bound_to"]}]}}
     }
   ],
   "additionalProperties": false,
@@ -139,8 +167,20 @@
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "utc": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
     "event_id": {"type": "string", "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$"},
-    "portable_path": {"type": "string", "minLength": 1, "pattern": "^(?![A-Za-z]:)(?!~)(?!\\.\\.?(?:/|$))[^/\\\\\\x00-\\x1f\\x7f-\\x9f]+(?:/(?!\\.\\.?(?:/|$))[^/\\\\\\x00-\\x1f\\x7f-\\x9f]+)*$", "description": "相対 path・/ 区切り。segment 単位で . / .. / 空 / 制御文字（C0 U+0000–U+001F・DEL U+007F・C1 U+0080–U+009F）/ バックスラッシュを拒否。先頭のドライブ文字・~ を拒否。<run_id> placeholder・日本語・通常の空白は許可"},
+    "portable_path": {"type": "string", "minLength": 1, "pattern": "^(?![A-Za-z]:)(?!~)(?!\\.\\.?(?:/|$))(?! )[^/\\\\\\x00-\\x1f\\x7f-\\x9f]*[^/\\\\\\x00-\\x1f\\x7f-\\x9f ](?:/(?!\\.\\.?(?:/|$))(?! )[^/\\\\\\x00-\\x1f\\x7f-\\x9f]*[^/\\\\\\x00-\\x1f\\x7f-\\x9f ])*$", "description": "相対 path・/ 区切り。segment 単位で . / .. / 空 / 制御文字（C0 U+0000–U+001F・DEL U+007F・C1 U+0080–U+009F）/ バックスラッシュを拒否。先頭のドライブ文字・~ を拒否。<run_id> placeholder・日本語・segment 途中の空白は許可（segment 先頭・末尾の空白は Windows の path alias なので拒否）"},
     "evidence_ref": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "additionalProperties": false,
+      "properties": {"path": {"$ref": "#/$defs/portable_path"}, "sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "bound_to_rule": {
+      "$comment": "new_state=accepted のときだけ bound_to を持てる。bound_to 自体は optional（R2-1: merge 3 より前の accepted event は持たない・append-only なので後から不正にしない）。あるなら proposal と effect_contract を必ず含む",
+      "if": {"properties": {"new_state": {"const": "accepted"}}, "required": ["new_state"]},
+      "then": {"properties": {"bound_to": {"required": ["proposal", "effect_contract"]}}},
+      "else": {"not": {"required": ["bound_to"]}}
+    },
+    "hash_ref": {
       "type": "object",
       "required": ["path", "sha256"],
       "additionalProperties": false,

@@ -23,6 +23,16 @@
       "minItems": 1,
       "items": {"$ref": "#/$defs/effect"}
     },
+    "expected_inputs": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "description": "実行前に揃っているべき入力集合の invariant（候補(a) の expected-accounts を昇格。account 以外の入力集合にも使えるよう汎用名にする）。extensions.expected-accounts と両方あるときは top-level が正で、validator が食い違いを報告する",
+      "properties": {
+        "accounts": {"type": "array", "minItems": 1, "uniqueItems": true,
+                     "items": {"type": "string", "minLength": 1, "pattern": "\\S"}}
+      }
+    },
     "concurrency": {
       "type": "object",
       "additionalProperties": false,
@@ -31,7 +41,7 @@
     "extensions": {"type": "object", "propertyNames": {"pattern": "^[a-z0-9][a-z0-9-]*$"}}
   },
   "$defs": {
-    "portable_path": {"type": "string", "minLength": 1, "pattern": "^(?![A-Za-z]:)(?!~)(?!\\.\\.?(?:/|$))[^/\\\\\\x00-\\x1f\\x7f-\\x9f]+(?:/(?!\\.\\.?(?:/|$))[^/\\\\\\x00-\\x1f\\x7f-\\x9f]+)*$", "description": "相対 path・/ 区切り。segment 単位で . / .. / 空 / 制御文字（C0 U+0000–U+001F・DEL U+007F・C1 U+0080–U+009F）/ バックスラッシュを拒否。先頭のドライブ文字・~ を拒否。<run_id> placeholder・日本語・通常の空白は許可"},
+    "portable_path": {"type": "string", "minLength": 1, "pattern": "^(?![A-Za-z]:)(?!~)(?!\\.\\.?(?:/|$))(?! )[^/\\\\\\x00-\\x1f\\x7f-\\x9f]*[^/\\\\\\x00-\\x1f\\x7f-\\x9f ](?:/(?!\\.\\.?(?:/|$))(?! )[^/\\\\\\x00-\\x1f\\x7f-\\x9f]*[^/\\\\\\x00-\\x1f\\x7f-\\x9f ])*$", "description": "相対 path・/ 区切り。segment 単位で . / .. / 空 / 制御文字（C0 U+0000–U+001F・DEL U+007F・C1 U+0080–U+009F）/ バックスラッシュを拒否。先頭のドライブ文字・~ を拒否。<run_id> placeholder・日本語・segment 途中の空白は許可（segment 先頭・末尾の空白は Windows の path alias なので拒否）"},
     "effect": {
       "type": "object",
       "required": ["id", "resource", "target", "op", "reversibility", "idempotency", "human_action"],
@@ -69,6 +79,7 @@
           "properties": {"method": {"type": "string", "minLength": 1}, "taken_before_write": {"const": true}, "scope": {"type": "string", "minLength": 1}}
         },
         "irreversible_ack": {"const": true, "description": "delete で backup を取らない場合の明示承認（reversibility=none とセット）"},
+        "capability_boundary": {"type": "string", "minLength": 1, "description": "この effect が触ってよい範囲の free-text 境界（例: 対象 sheet の1タブだけ・自分が作った run directory だけ）。宣言であって runtime の enforcement ではない"},
         "postcondition": {"type": "string", "minLength": 1, "description": "mutation set 以上を比較する条件（values・書式・順序…）"},
         "freshness": {"type": "string", "minLength": 1, "description": "read: 取得物の新しさの条件（mtime・period）"},
         "completeness": {"type": "string", "minLength": 1, "description": "read: 取得物の完全性の条件（件数・schema）"}

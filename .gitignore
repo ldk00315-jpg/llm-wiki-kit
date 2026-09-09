@@ -7,3 +7,4 @@ __pycache__/
 # 先頭スラッシュでルート限定にすること —— `.obsidian/` と書くと
 # template/.wiki/.obsidian/（配布する正規のVault設定）まで無視される
 /.obsidian/
+.venv/
